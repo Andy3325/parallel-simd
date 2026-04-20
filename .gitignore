@@ -1,0 +1,18 @@
+*.o
+*.out
+*.exe
+*.a
+*.so
+*.log
+*.zip
+
+build/
+bin/
+files/
+guessdata/
+output/
+__pycache__/
+
+# Common local artifacts
+main
+correctness
