@@ -1,20 +1,38 @@
-# parallel
+# parallel-simd
 
-`parallel` is the current-stage repository for a Parallel Programming experiment focused on the SIMD password guessing subtask.
+`parallel-simd` is a SIMD parallel programming lab project. The current focus is MD5 NEON 4-way parallelization within the existing password-guessing experiment codebase.
 
-## Background
+This repository is being prepared conservatively for ongoing lab work, so existing source files remain in place unless there is a clear need to reorganize them later.
 
-This project comes from a parallel programming lab / experiment on password guessing. The current codebase is organized around an MD5-based 4-lane batch processing framework, and the main flow has already been connected to the `MD5Hash4` interface for batched invocation.
+## Current Focus
 
-This is a current development-stage version rather than the final optimized release.
+- SIMD parallel programming lab setup
+- MD5 NEON 4-way parallelization
+- Preserving the current baseline implementation while preparing for later optimization work
 
-## Current Version Scope
+## Project Tree
 
-- MD5-based 4-lane batch hashing entry point via `MD5Hash4`
-- Main guessing flow updated to call the batch hashing interface in groups of four
-- Training and guessing code kept as the current experiment baseline
+```text
+parallel-simd/
+├── README.md
+├── .gitignore
+├── include/
+├── report/
+├── scripts/
+├── src/
+├── tests/
+├── PCFG.h
+├── md5.h
+├── md5.cpp
+├── main.cpp
+├── guessing.cpp
+├── train.cpp
+├── correctness.cpp
+├── qsub.sh
+└── test.sh
+```
 
-## Core Files
+## Existing Core Files
 
 - `md5.h`
 - `md5.cpp`
@@ -22,21 +40,23 @@ This is a current development-stage version rather than the final optimized rele
 - `guessing.cpp`
 - `train.cpp`
 
-## Build Example
+## Build And Run
 
-The current code can be compiled with a standard `g++` toolchain and the existing project sources:
+Exact long-term build commands may change as the project is reorganized for lab work.
+
+Current baseline build example:
 
 ```bash
 g++ main.cpp train.cpp guessing.cpp md5.cpp -O2 -o main
 ```
 
-If you want a correctness-oriented build without extra optimization, you can also use:
+Current baseline run placeholder:
 
 ```bash
-g++ main.cpp train.cpp guessing.cpp md5.cpp -o main
+./main
 ```
 
 ## Notes
 
-- This repository keeps the source code, scripts, and lightweight documentation for the current stage.
-- Large datasets, generated outputs, caches, binaries, and intermediate experiment artifacts should not be committed.
+- This is a lab repository setup stage, not the final optimized SIMD implementation.
+- Existing code and history are preserved for incremental NEON-focused development.

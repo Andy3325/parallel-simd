@@ -1,18 +1,41 @@
 *.o
+*.obj
 *.out
 *.exe
 *.a
+*.lib
 *.so
+*.dll
+*.dylib
 *.log
 *.zip
+*.tar
+*.gz
+*.7z
 
 build/
+Build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+Makefile
+makedep*
 bin/
 files/
 guessdata/
 output/
 __pycache__/
+Debug/
+Release/
+.cache/
 
 # Common local artifacts
 main
 correctness
+
+# Editors and OS metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
