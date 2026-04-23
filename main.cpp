@@ -4,6 +4,9 @@
 #include <sstream>
 #include "md5.h"
 #include <iomanip>
+#include <unordered_map>
+#include <vector>
+
 using namespace std;
 using namespace chrono;
 
@@ -11,6 +14,27 @@ using namespace chrono;
 // g++ main.cpp train.cpp guessing.cpp md5.cpp -o main
 // g++ main.cpp train.cpp guessing.cpp md5.cpp -o main -O1
 // g++ main.cpp train.cpp guessing.cpp md5.cpp -o main -O2
+
+static inline size_t GetMD5BlockCount(const string& s)
+{
+    // MD5 最终总长度 = 原始长度 + 1字节0x80 + 8字节长度字段 + 若干补零
+    size_t total = s.size() + 1 + 8;
+    if (total % 64 != 0)
+    {
+        total += 64 - (total % 64);
+    }
+    return total / 64;
+}
+
+static inline void FlushBucketRemainder(vector<string>& bucket)
+{
+    bit32 state[4];
+    for (const string& pw : bucket)
+    {
+        MD5Hash(pw, state);
+    }
+    bucket.clear();
+}
 
 int main()
 {
@@ -27,6 +51,7 @@ int main()
         "81dc9bdb52d04dc20036dbd8313ed055",
         "96e79218965eb72c92a549dd5a330112"
     };
+
     for (int i = 0; i < 8; i++) {
         bit32 state[4];
         MD5Hash(test_pws[i], state);
@@ -64,6 +89,7 @@ int main()
     double time_guess = 0; // 哈希和猜测的总时长
     double time_train = 0; // 模型训练的总时长
     PriorityQueue q;
+
     auto start_train = system_clock::now();
     q.m.train("/guessdata/Rockyou-singleLined-full.txt");
     q.m.order();
@@ -73,14 +99,17 @@ int main()
 
     q.init();
     cout << "here" << endl;
+
     int curr_num = 0;
     auto start = system_clock::now();
     // 由于需要定期清空内存，我们在这里记录已生成的猜测总数
     int history = 0;
+
     while (!q.priority.empty())
     {
         q.PopNext();
         q.total_guesses = q.guesses.size();
+
         if (q.total_guesses - curr_num >= 100000)
         {
             cout << "Guesses generated: " << history + q.total_guesses << endl;
@@ -91,6 +120,7 @@ int main()
                 auto end = system_clock::now();
                 auto duration = duration_cast<microseconds>(end - start);
                 time_guess = double(duration.count()) * microseconds::period::num / microseconds::period::den;
+
                 cout << "Guess time:" << time_guess - time_hash << "seconds" << endl; // 请不要修改这一行
                 cout << "Hash time:" << time_hash << "seconds" << endl;               // 请不要修改这一行
                 cout << "Train time:" << time_train << "seconds" << endl;             // 请不要修改这一行
@@ -98,34 +128,36 @@ int main()
             }
         }
 
-        // 为了避免内存超限，我们在q.guesses中口令达到一定数目时，将其中的所有口令取出并且进行哈希
-        // 然后，q.guesses将会被清空。为了有效记录已经生成的口令总数，维护一个history变量来进行记录
+        // 为了避免内存超限，我们在 q.guesses 中口令达到一定数目时，将其中的所有口令取出并进行哈希
+        // 这里改成：先按 padding 后的 block 数分桶，同一个桶凑满 4 个再调用一次 MD5Hash4
         if (curr_num > 1000000)
         {
             auto start_hash = system_clock::now();
+
+            // key = block 数；value = 该 block 桶里的待哈希口令
+            unordered_map<size_t, vector<string>> buckets;
             bit32 states4[4][4];
-            size_t i = 0;
 
-            // 每4个口令一组，调用一次 MD5Hash4
-            for (; i + 3 < q.guesses.size(); i += 4)
+            // 先按 block 数分桶
+            for (const string& pw : q.guesses)
             {
-                MD5Hash4(&q.guesses[i], states4);
+                size_t blk = GetMD5BlockCount(pw);
+                auto& bucket = buckets[blk];
+                bucket.emplace_back(pw);
 
-                // 以下注释部分用于输出猜测和哈希，但是由于自动测试系统不太能写文件，所以这里你可以改成cout
-                // for (int lane = 0; lane < 4; ++lane) {
-                //     cout << q.guesses[i + lane] << "\t";
-                //     for (int k = 0; k < 4; ++k) {
-                //         cout << std::setw(8) << std::setfill('0') << hex << states4[lane][k];
-                //     }
-                //     cout << endl;
-                // }
+                // 同一个桶凑够 4 个，就立刻并行哈希
+                if (bucket.size() == 4)
+                {
+                    MD5Hash4(bucket.data(), states4);
+
+                    bucket.clear();
+                }
             }
 
-            // 剩余不足4个的尾巴，继续用原来的串行 MD5Hash
-            for (; i < q.guesses.size(); ++i)
+            // 每个桶最后不足 4 个的尾巴，用串行补算
+            for (auto& kv : buckets)
             {
-                bit32 state[4];
-                MD5Hash(q.guesses[i], state);
+                FlushBucketRemainder(kv.second);
             }
 
             // 在这里对哈希所需的总时长进行计算

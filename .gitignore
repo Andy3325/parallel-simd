@@ -32,7 +32,9 @@ Release/
 
 # Common local artifacts
 main
+main_*
 correctness
+smoke_test
 
 # Editors and OS metadata
 .DS_Store
