@@ -66,7 +66,7 @@ int main()
         }
     }
 
-    // 再测一次4路并行版本，避免你只验证了串行版本。
+    // 再测一次4路并行版本
     bit32 batch_states[4][4];
     MD5Hash4(test_pws, batch_states);
     for (int lane = 0; lane < 4; ++lane)
@@ -83,14 +83,35 @@ int main()
             return 1;
         }
     }
+
+    // 再测一次1-block快路径版本（前4个测试口令都 <= 55 bytes）
+    bit32 batch_states_1b[4][4];
+    MD5Hash4_1Block(test_pws, batch_states_1b);
+    for (int lane = 0; lane < 4; ++lane)
+    {
+        stringstream ss;
+        for (int i1 = 0; i1 < 4; ++i1)
+        {
+            ss << std::setw(8) << std::setfill('0') << hex << batch_states_1b[lane][i1];
+        }
+        if (ss.str() != test_hashes[lane])
+        {
+            cout << "MD5Hash4_1Block test failed for lane " << lane << "!" << endl;
+            cout << "Expected: " << test_hashes[lane] << "\nGot:      " << ss.str() << endl;
+            return 1;
+        }
+    }
+
     cout << "MD5Hash test passed!" << endl; // 请不要修改这一行
 
     double time_hash = 0;  // 用于MD5哈希的时间
-    double time_guess = 0; // 哈希和猜测的总时长
+    double time_guess = 0; // 猜测阶段时间（最终打印时是总时间减掉 hash）
     double time_train = 0; // 模型训练的总时长
+
     PriorityQueue q;
 
     auto start_train = system_clock::now();
+    cout << "Training..." << endl;
     q.m.train("/guessdata/Rockyou-singleLined-full.txt");
     q.m.order();
     auto end_train = system_clock::now();
@@ -102,8 +123,13 @@ int main()
 
     int curr_num = 0;
     auto start = system_clock::now();
+
     // 由于需要定期清空内存，我们在这里记录已生成的猜测总数
     int history = 0;
+
+    // 统计快路径和通用路径到底被调用了多少批
+    size_t total_one_block_batches = 0;
+    size_t total_general_batches = 0;
 
     while (!q.priority.empty())
     {
@@ -121,6 +147,8 @@ int main()
                 auto duration = duration_cast<microseconds>(end - start);
                 time_guess = double(duration.count()) * microseconds::period::num / microseconds::period::den;
 
+                cout << "one_block_batches=" << total_one_block_batches << endl;
+                cout << "general_batches=" << total_general_batches << endl;
                 cout << "Guess time:" << time_guess - time_hash << "seconds" << endl; // 请不要修改这一行
                 cout << "Hash time:" << time_hash << "seconds" << endl;               // 请不要修改这一行
                 cout << "Train time:" << time_train << "seconds" << endl;             // 请不要修改这一行
@@ -129,7 +157,6 @@ int main()
         }
 
         // 为了避免内存超限，我们在 q.guesses 中口令达到一定数目时，将其中的所有口令取出并进行哈希
-        // 这里改成：先按 padding 后的 block 数分桶，同一个桶凑满 4 个再调用一次 MD5Hash4
         if (curr_num > 1000000)
         {
             auto start_hash = system_clock::now();
@@ -148,7 +175,25 @@ int main()
                 // 同一个桶凑够 4 个，就立刻并行哈希
                 if (bucket.size() == 4)
                 {
-                    MD5Hash4(bucket.data(), states4);
+                    if (blk == 1)
+                    {
+                        ++total_one_block_batches;
+                        MD5Hash4_1Block(bucket.data(), states4);
+                    }
+                    else
+                    {
+                        ++total_general_batches;
+                        MD5Hash4(bucket.data(), states4);
+                    }
+
+                    // 以下注释部分用于输出猜测和哈希
+                    // for (int lane = 0; lane < 4; ++lane) {
+                    //     cout << bucket[lane] << "\t";
+                    //     for (int k = 0; k < 4; ++k) {
+                    //         cout << std::setw(8) << std::setfill('0') << hex << states4[lane][k];
+                    //     }
+                    //     cout << endl;
+                    // }
 
                     bucket.clear();
                 }
@@ -171,4 +216,6 @@ int main()
             q.guesses.clear();
         }
     }
+
+    return 0;
 }

@@ -386,3 +386,136 @@ void MD5Hash4(const string *inputs, bit32 states[4][4])
     }
 #endif
 }
+
+void MD5Hash4_1Block(const string *inputs, bit32 states[4][4])
+{
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    Byte *paddedMessages[4] = {nullptr, nullptr, nullptr, nullptr};
+    int messageLengths[4] = {0, 0, 0, 0};
+
+    for (int lane = 0; lane < 4; ++lane)
+    {
+        paddedMessages[lane] = StringProcess(inputs[lane], &messageLengths[lane]);
+        assert(messageLengths[lane] == 64);
+    }
+
+    uint32x4_t x[16];
+    for (int word = 0; word < 16; ++word)
+    {
+        uint32_t lanes[4];
+        for (int lane = 0; lane < 4; ++lane)
+        {
+            Byte *base = paddedMessages[lane] + word * 4;
+            lanes[lane] = (uint32_t(base[0])) |
+                          (uint32_t(base[1]) << 8) |
+                          (uint32_t(base[2]) << 16) |
+                          (uint32_t(base[3]) << 24);
+        }
+        x[word] = vld1q_u32(lanes);
+    }
+
+    uint32x4_t state0 = vdupq_n_u32(0x67452301u);
+    uint32x4_t state1 = vdupq_n_u32(0xefcdab89u);
+    uint32x4_t state2 = vdupq_n_u32(0x98badcfeu);
+    uint32x4_t state3 = vdupq_n_u32(0x10325476u);
+
+    uint32x4_t a = state0;
+    uint32x4_t b = state1;
+    uint32x4_t c = state2;
+    uint32x4_t d = state3;
+
+    /* Round 1 */
+    VFF(a, b, c, d, x[0], s11, 0xd76aa478u);
+    VFF(d, a, b, c, x[1], s12, 0xe8c7b756u);
+    VFF(c, d, a, b, x[2], s13, 0x242070dbu);
+    VFF(b, c, d, a, x[3], s14, 0xc1bdceeeu);
+    VFF(a, b, c, d, x[4], s11, 0xf57c0fafu);
+    VFF(d, a, b, c, x[5], s12, 0x4787c62au);
+    VFF(c, d, a, b, x[6], s13, 0xa8304613u);
+    VFF(b, c, d, a, x[7], s14, 0xfd469501u);
+    VFF(a, b, c, d, x[8], s11, 0x698098d8u);
+    VFF(d, a, b, c, x[9], s12, 0x8b44f7afu);
+    VFF(c, d, a, b, x[10], s13, 0xffff5bb1u);
+    VFF(b, c, d, a, x[11], s14, 0x895cd7beu);
+    VFF(a, b, c, d, x[12], s11, 0x6b901122u);
+    VFF(d, a, b, c, x[13], s12, 0xfd987193u);
+    VFF(c, d, a, b, x[14], s13, 0xa679438eu);
+    VFF(b, c, d, a, x[15], s14, 0x49b40821u);
+
+    /* Round 2 */
+    VGG(a, b, c, d, x[1], s21, 0xf61e2562u);
+    VGG(d, a, b, c, x[6], s22, 0xc040b340u);
+    VGG(c, d, a, b, x[11], s23, 0x265e5a51u);
+    VGG(b, c, d, a, x[0], s24, 0xe9b6c7aau);
+    VGG(a, b, c, d, x[5], s21, 0xd62f105du);
+    VGG(d, a, b, c, x[10], s22, 0x02441453u);
+    VGG(c, d, a, b, x[15], s23, 0xd8a1e681u);
+    VGG(b, c, d, a, x[4], s24, 0xe7d3fbc8u);
+    VGG(a, b, c, d, x[9], s21, 0x21e1cde6u);
+    VGG(d, a, b, c, x[14], s22, 0xc33707d6u);
+    VGG(c, d, a, b, x[3], s23, 0xf4d50d87u);
+    VGG(b, c, d, a, x[8], s24, 0x455a14edu);
+    VGG(a, b, c, d, x[13], s21, 0xa9e3e905u);
+    VGG(d, a, b, c, x[2], s22, 0xfcefa3f8u);
+    VGG(c, d, a, b, x[7], s23, 0x676f02d9u);
+    VGG(b, c, d, a, x[12], s24, 0x8d2a4c8au);
+
+    /* Round 3 */
+    VHH(a, b, c, d, x[5], s31, 0xfffa3942u);
+    VHH(d, a, b, c, x[8], s32, 0x8771f681u);
+    VHH(c, d, a, b, x[11], s33, 0x6d9d6122u);
+    VHH(b, c, d, a, x[14], s34, 0xfde5380cu);
+    VHH(a, b, c, d, x[1], s31, 0xa4beea44u);
+    VHH(d, a, b, c, x[4], s32, 0x4bdecfa9u);
+    VHH(c, d, a, b, x[7], s33, 0xf6bb4b60u);
+    VHH(b, c, d, a, x[10], s34, 0xbebfbc70u);
+    VHH(a, b, c, d, x[13], s31, 0x289b7ec6u);
+    VHH(d, a, b, c, x[0], s32, 0xeaa127fau);
+    VHH(c, d, a, b, x[3], s33, 0xd4ef3085u);
+    VHH(b, c, d, a, x[6], s34, 0x04881d05u);
+    VHH(a, b, c, d, x[9], s31, 0xd9d4d039u);
+    VHH(d, a, b, c, x[12], s32, 0xe6db99e5u);
+    VHH(c, d, a, b, x[15], s33, 0x1fa27cf8u);
+    VHH(b, c, d, a, x[2], s34, 0xc4ac5665u);
+
+    /* Round 4 */
+    VII(a, b, c, d, x[0], s41, 0xf4292244u);
+    VII(d, a, b, c, x[7], s42, 0x432aff97u);
+    VII(c, d, a, b, x[14], s43, 0xab9423a7u);
+    VII(b, c, d, a, x[5], s44, 0xfc93a039u);
+    VII(a, b, c, d, x[12], s41, 0x655b59c3u);
+    VII(d, a, b, c, x[3], s42, 0x8f0ccc92u);
+    VII(c, d, a, b, x[10], s43, 0xffeff47du);
+    VII(b, c, d, a, x[1], s44, 0x85845dd1u);
+    VII(a, b, c, d, x[8], s41, 0x6fa87e4fu);
+    VII(d, a, b, c, x[15], s42, 0xfe2ce6e0u);
+    VII(c, d, a, b, x[6], s43, 0xa3014314u);
+    VII(b, c, d, a, x[13], s44, 0x4e0811a1u);
+    VII(a, b, c, d, x[4], s41, 0xf7537e82u);
+    VII(d, a, b, c, x[11], s42, 0xbd3af235u);
+    VII(c, d, a, b, x[2], s43, 0x2ad7d2bbu);
+    VII(b, c, d, a, x[9], s44, 0xeb86d391u);
+
+    state0 = vaddq_u32(state0, a);
+    state1 = vaddq_u32(state1, b);
+    state2 = vaddq_u32(state2, c);
+    state3 = vaddq_u32(state3, d);
+
+    uint32_t out0[4], out1[4], out2[4], out3[4];
+    vst1q_u32(out0, state0);
+    vst1q_u32(out1, state1);
+    vst1q_u32(out2, state2);
+    vst1q_u32(out3, state3);
+
+    for (int lane = 0; lane < 4; ++lane)
+    {
+        states[lane][0] = ByteSwap32(out0[lane]);
+        states[lane][1] = ByteSwap32(out1[lane]);
+        states[lane][2] = ByteSwap32(out2[lane]);
+        states[lane][3] = ByteSwap32(out3[lane]);
+        delete[] paddedMessages[lane];
+    }
+#else
+    MD5Hash4(inputs, states);
+#endif
+}

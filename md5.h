@@ -82,3 +82,4 @@ typedef unsigned int bit32;
 void MD5Hash(string input, bit32 *state);
 void MD5Hash4(const string *inputs, bit32 states[4][4]);
 // SIMD版本：一次并行处理连续存放的4个口令。
+void MD5Hash4_1Block(const string *inputs, bit32 states[4][4]);
