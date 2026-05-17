@@ -184,36 +184,53 @@ void PriorityQueue::Generate(PT pt)
     // 计算PT的概率，这里主要是给PT的概率进行初始化
     CalProb(pt);
 
+    auto getSegmentPtr = [this](const segment& seg) -> segment*
+    {
+        if (seg.type == 1)
+        {
+            return &m.letters[m.FindLetter(seg)];
+        }
+        if (seg.type == 2)
+        {
+            return &m.digits[m.FindDigit(seg)];
+        }
+        if (seg.type == 3)
+        {
+            return &m.symbols[m.FindSymbol(seg)];
+        }
+        return nullptr;
+    };
+
+    auto appendSegmentValuesSerial = [this](const string& prefix, segment* a, int n)
+    {
+        size_t base = guesses.size();
+        guesses.resize(base + n);
+        for (int i = 0; i < n; i += 1)
+        {
+            if (prefix.empty())
+            {
+                guesses[base + i] = a->ordered_values[i];
+            }
+            else
+            {
+                guesses[base + i] = prefix + a->ordered_values[i];
+            }
+        }
+        total_guesses += n;
+    };
+
     // 对于只有一个segment的PT，直接遍历生成其中的所有value即可
     if (pt.content.size() == 1)
     {
         // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
-        segment *a;
+        segment *a = getSegmentPtr(pt.content[0]);
         // 在模型中定位到这个segment
-        if (pt.content[0].type == 1)
-        {
-            a = &m.letters[m.FindLetter(pt.content[0])];
-        }
-        if (pt.content[0].type == 2)
-        {
-            a = &m.digits[m.FindDigit(pt.content[0])];
-        }
-        if (pt.content[0].type == 3)
-        {
-            a = &m.symbols[m.FindSymbol(pt.content[0])];
-        }
         
         // Multi-thread TODO：
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
-        for (int i = 0; i < pt.max_indices[0]; i += 1)
-        {
-            string guess = a->ordered_values[i];
-            // cout << guess << endl;
-            guesses.emplace_back(guess);
-            total_guesses += 1;
-        }
+        appendSegmentValuesSerial("", a, pt.max_indices[0]);
     }
     else
     {
@@ -244,30 +261,12 @@ void PriorityQueue::Generate(PT pt)
         }
 
         // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
-        segment *a;
-        if (pt.content[pt.content.size() - 1].type == 1)
-        {
-            a = &m.letters[m.FindLetter(pt.content[pt.content.size() - 1])];
-        }
-        if (pt.content[pt.content.size() - 1].type == 2)
-        {
-            a = &m.digits[m.FindDigit(pt.content[pt.content.size() - 1])];
-        }
-        if (pt.content[pt.content.size() - 1].type == 3)
-        {
-            a = &m.symbols[m.FindSymbol(pt.content[pt.content.size() - 1])];
-        }
+        segment *a = getSegmentPtr(pt.content[pt.content.size() - 1]);
         
         // Multi-thread TODO：
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
-        for (int i = 0; i < pt.max_indices[pt.content.size() - 1]; i += 1)
-        {
-            string temp = guess + a->ordered_values[i];
-            // cout << temp << endl;
-            guesses.emplace_back(temp);
-            total_guesses += 1;
-        }
+        appendSegmentValuesSerial(guess, a, pt.max_indices[pt.content.size() - 1]);
     }
 }
