@@ -155,8 +155,19 @@ public:
     // 对优先队列的一个PT，生成所有guesses
     void Generate(PT pt);
 
+    void PrintGenerateStats() const;
+
     // 将优先队列最前面的一个PT
     void PopNext();
     int total_guesses = 0;
     vector<string> guesses;
+
+    long long generate_calls = 0;
+    long long append_calls = 0;
+    long long append_serial_calls = 0;
+    long long append_parallel_calls = 0;
+    long long append_total_items = 0;
+    long long append_parallel_items = 0;
+    double generate_time_sec = 0.0;
+    double append_time_sec = 0.0;
 };

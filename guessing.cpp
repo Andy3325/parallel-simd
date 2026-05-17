@@ -2,6 +2,7 @@
 #ifdef ENABLE_OPENMP_GENERATE
 #include <omp.h>
 #endif
+#include <chrono>
 using namespace std;
 
 void PriorityQueue::CalProb(PT &pt)
@@ -184,6 +185,9 @@ vector<PT> PT::NewPTs()
 // 尽量看懂，然后进行并行实现
 void PriorityQueue::Generate(PT pt)
 {
+    generate_calls += 1;
+    auto generate_start = std::chrono::high_resolution_clock::now();
+
     // 计算PT的概率，这里主要是给PT的概率进行初始化
     CalProb(pt);
 
@@ -208,11 +212,17 @@ void PriorityQueue::Generate(PT pt)
 
     auto appendSegmentValues = [this, PARALLEL_THRESHOLD](const string& prefix, segment* a, int n)
     {
+        append_calls += 1;
+        append_total_items += n;
+        auto append_start = std::chrono::high_resolution_clock::now();
+
         size_t base = guesses.size();
         guesses.resize(base + n);
 #if defined(ENABLE_OPENMP_GENERATE) && defined(_OPENMP)
         if (n >= PARALLEL_THRESHOLD)
         {
+            append_parallel_calls += 1;
+            append_parallel_items += n;
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < n; ++i)
             {
@@ -226,9 +236,12 @@ void PriorityQueue::Generate(PT pt)
                 }
             }
             total_guesses += n;
+            auto append_end = std::chrono::high_resolution_clock::now();
+            append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
             return;
         }
 #endif
+        append_serial_calls += 1;
         for (int i = 0; i < n; i += 1)
         {
             if (prefix.empty())
@@ -241,6 +254,8 @@ void PriorityQueue::Generate(PT pt)
             }
         }
         total_guesses += n;
+        auto append_end = std::chrono::high_resolution_clock::now();
+        append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
     };
 
     // 对于只有一个segment的PT，直接遍历生成其中的所有value即可
@@ -293,4 +308,20 @@ void PriorityQueue::Generate(PT pt)
         // 这个过程是可以高度并行化的
         appendSegmentValues(guess, a, pt.max_indices[pt.content.size() - 1]);
     }
+
+    auto generate_end = std::chrono::high_resolution_clock::now();
+    generate_time_sec += std::chrono::duration<double>(generate_end - generate_start).count();
+}
+
+void PriorityQueue::PrintGenerateStats() const
+{
+    cout << "[GenerateStats]" << endl;
+    cout << "generate_calls = " << generate_calls << endl;
+    cout << "append_calls = " << append_calls << endl;
+    cout << "append_serial_calls = " << append_serial_calls << endl;
+    cout << "append_parallel_calls = " << append_parallel_calls << endl;
+    cout << "append_total_items = " << append_total_items << endl;
+    cout << "append_parallel_items = " << append_parallel_items << endl;
+    cout << "generate_time_sec = " << generate_time_sec << endl;
+    cout << "append_time_sec = " << append_time_sec << endl;
 }

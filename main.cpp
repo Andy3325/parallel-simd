@@ -6,18 +6,13 @@
 #include <iomanip>
 #include <unordered_map>
 #include <vector>
+#include <cstdlib>
 
 using namespace std;
 using namespace chrono;
 
-// 编译指令如下
-// g++ main.cpp train.cpp guessing.cpp md5.cpp -o main
-// g++ main.cpp train.cpp guessing.cpp md5.cpp -o main -O1
-// g++ main.cpp train.cpp guessing.cpp md5.cpp -o main -O2
-
 static inline size_t GetMD5BlockCount(const string& s)
 {
-    // MD5 最终总长度 = 原始长度 + 1字节0x80 + 8字节长度字段 + 若干补零
     size_t total = s.size() + 1 + 8;
     if (total % 64 != 0)
     {
@@ -36,9 +31,88 @@ static inline void FlushBucketRemainder(vector<string>& bucket)
     bucket.clear();
 }
 
-int main()
+static bool FileExists(const string& path)
 {
-    // 下面代码用于测试MD5哈希的正确性
+    ifstream file(path);
+    return file.good();
+}
+
+static string ResolveTrainPath(const string& requested_path)
+{
+    if (!requested_path.empty())
+    {
+        return requested_path;
+    }
+
+    vector<string> candidates = {
+        "guessdata/Rockyou-singleLined-full.txt",
+        "../guessdata/Rockyou-singleLined-full.txt",
+        "../../guessdata/Rockyou-singleLined-full.txt",
+        "Rockyou-singleLined-full.txt",
+        "/guessdata/Rockyou-singleLined-full.txt",
+        "guessdata/benchmark-small.txt"
+    };
+
+    for (const string& path : candidates)
+    {
+        if (FileExists(path))
+        {
+            return path;
+        }
+    }
+
+    return candidates.back();
+}
+
+static void HashAndClearGuesses(PriorityQueue& q, double& time_hash, size_t& total_one_block_batches, size_t& total_general_batches)
+{
+    if (q.guesses.empty())
+    {
+        return;
+    }
+
+    auto start_hash = system_clock::now();
+    unordered_map<size_t, vector<string>> buckets;
+    bit32 states4[4][4];
+
+    for (const string& pw : q.guesses)
+    {
+        size_t blk = GetMD5BlockCount(pw);
+        auto& bucket = buckets[blk];
+        bucket.emplace_back(pw);
+
+        if (bucket.size() == 4)
+        {
+            if (blk == 1)
+            {
+                ++total_one_block_batches;
+                MD5Hash4_1Block(bucket.data(), states4);
+            }
+            else
+            {
+                ++total_general_batches;
+                MD5Hash4(bucket.data(), states4);
+            }
+
+            bucket.clear();
+        }
+    }
+
+    for (auto& kv : buckets)
+    {
+        FlushBucketRemainder(kv.second);
+    }
+
+    auto end_hash = system_clock::now();
+    auto duration = duration_cast<microseconds>(end_hash - start_hash);
+    time_hash += double(duration.count()) * microseconds::period::num / microseconds::period::den;
+
+    q.guesses.clear();
+    q.total_guesses = 0;
+}
+
+int main(int argc, char* argv[])
+{
     cout << "Testing MD5Hash correctness..." << endl;
     string test_pws[8] = {"123456", "password", "12345678", "qwerty", "123456789", "12345", "1234", "111111"};
     string test_hashes[8] = {
@@ -52,21 +126,23 @@ int main()
         "96e79218965eb72c92a549dd5a330112"
     };
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 8; i++)
+    {
         bit32 state[4];
         MD5Hash(test_pws[i], state);
         stringstream ss;
-        for (int i1 = 0; i1 < 4; i1 += 1) {
+        for (int i1 = 0; i1 < 4; i1 += 1)
+        {
             ss << std::setw(8) << std::setfill('0') << hex << state[i1];
         }
-        if (ss.str() != test_hashes[i]) {
+        if (ss.str() != test_hashes[i])
+        {
             cout << "MD5Hash test failed for " << test_pws[i] << "!" << endl;
             cout << "Expected: " << test_hashes[i] << "\nGot:      " << ss.str() << endl;
             return 1;
         }
     }
 
-    // 再测一次4路并行版本
     bit32 batch_states[4][4];
     MD5Hash4(test_pws, batch_states);
     for (int lane = 0; lane < 4; ++lane)
@@ -84,7 +160,6 @@ int main()
         }
     }
 
-    // 再测一次1-block快路径版本（前4个测试口令都 <= 55 bytes）
     bit32 batch_states_1b[4][4];
     MD5Hash4_1Block(test_pws, batch_states_1b);
     for (int lane = 0; lane < 4; ++lane)
@@ -102,120 +177,91 @@ int main()
         }
     }
 
-    cout << "MD5Hash test passed!" << endl; // 请不要修改这一行
+    cout << "MD5Hash test passed!" << endl; // Please do not modify this line.
 
-    double time_hash = 0;  // 用于MD5哈希的时间
-    double time_guess = 0; // 猜测阶段时间（最终打印时是总时间减掉 hash）
-    double time_train = 0; // 模型训练的总时长
+    double time_hash = 0;
+    double time_guess = 0;
+    double time_train = 0;
+
+    const int DEFAULT_BENCHMARK_ROUNDS = 1000;
+    const size_t HASH_FLUSH_THRESHOLD = 1000000;
+    int benchmark_rounds = DEFAULT_BENCHMARK_ROUNDS;
+    string requested_train_path;
+
+    for (int i = 1; i < argc; i += 1)
+    {
+        string arg = argv[i];
+        if (arg == "--guess-rounds" && i + 1 < argc)
+        {
+            benchmark_rounds = atoi(argv[++i]);
+            if (benchmark_rounds < 0)
+            {
+                benchmark_rounds = 0;
+            }
+        }
+        else if (arg == "--train" && i + 1 < argc)
+        {
+            requested_train_path = argv[++i];
+        }
+    }
+
+    string train_path = ResolveTrainPath(requested_train_path);
+    if (!FileExists(train_path))
+    {
+        cout << "Training dataset not found: " << train_path << endl;
+        cout << "Use --train <path> to specify an existing training set." << endl;
+        return 1;
+    }
 
     PriorityQueue q;
 
     auto start_train = system_clock::now();
-    cout << "Training..." << endl;
-    q.m.train("/guessdata/Rockyou-singleLined-full.txt");
+    cout << "Training dataset: " << train_path << endl;
+    cout << "Guess benchmark rounds: " << benchmark_rounds << endl;
+    q.m.train(train_path);
     q.m.order();
     auto end_train = system_clock::now();
     auto duration_train = duration_cast<microseconds>(end_train - start_train);
     time_train = double(duration_train.count()) * microseconds::period::num / microseconds::period::den;
 
     q.init();
-    cout << "here" << endl;
+    cout << "Initial priority size: " << q.priority.size() << endl;
 
-    int curr_num = 0;
-    auto start = system_clock::now();
-
-    // 由于需要定期清空内存，我们在这里记录已生成的猜测总数
-    int history = 0;
-
-    // 统计快路径和通用路径到底被调用了多少批
     size_t total_one_block_batches = 0;
     size_t total_general_batches = 0;
+    long long benchmark_total_guesses = 0;
 
-    while (!q.priority.empty())
+    auto start_guess = system_clock::now();
+    for (int round = 0; round < benchmark_rounds && !q.priority.empty(); round += 1)
     {
+        size_t before = q.guesses.size();
         q.PopNext();
         q.total_guesses = q.guesses.size();
+        benchmark_total_guesses += static_cast<long long>(q.guesses.size() - before);
 
-        if (q.total_guesses - curr_num >= 100000)
+        if (benchmark_total_guesses > 0 && benchmark_total_guesses % 100000 == 0)
         {
-            cout << "Guesses generated: " << history + q.total_guesses << endl;
-            curr_num = q.total_guesses;
-
-            if (history + q.total_guesses > 10000000)
-            {
-                auto end = system_clock::now();
-                auto duration = duration_cast<microseconds>(end - start);
-                time_guess = double(duration.count()) * microseconds::period::num / microseconds::period::den;
-
-                cout << "one_block_batches=" << total_one_block_batches << endl;
-                cout << "general_batches=" << total_general_batches << endl;
-                cout << "Guess time:" << time_guess - time_hash << "seconds" << endl; // 请不要修改这一行
-                cout << "Hash time:" << time_hash << "seconds" << endl;               // 请不要修改这一行
-                cout << "Train time:" << time_train << "seconds" << endl;             // 请不要修改这一行
-                break;
-            }
+            cout << "Guesses generated: " << benchmark_total_guesses << endl;
         }
 
-        // 为了避免内存超限，我们在 q.guesses 中口令达到一定数目时，将其中的所有口令取出并进行哈希
-        if (curr_num > 1000000)
+        if (q.guesses.size() >= HASH_FLUSH_THRESHOLD)
         {
-            auto start_hash = system_clock::now();
-
-            // key = block 数；value = 该 block 桶里的待哈希口令
-            unordered_map<size_t, vector<string>> buckets;
-            bit32 states4[4][4];
-
-            // 先按 block 数分桶
-            for (const string& pw : q.guesses)
-            {
-                size_t blk = GetMD5BlockCount(pw);
-                auto& bucket = buckets[blk];
-                bucket.emplace_back(pw);
-
-                // 同一个桶凑够 4 个，就立刻并行哈希
-                if (bucket.size() == 4)
-                {
-                    if (blk == 1)
-                    {
-                        ++total_one_block_batches;
-                        MD5Hash4_1Block(bucket.data(), states4);
-                    }
-                    else
-                    {
-                        ++total_general_batches;
-                        MD5Hash4(bucket.data(), states4);
-                    }
-
-                    // 以下注释部分用于输出猜测和哈希
-                    // for (int lane = 0; lane < 4; ++lane) {
-                    //     cout << bucket[lane] << "\t";
-                    //     for (int k = 0; k < 4; ++k) {
-                    //         cout << std::setw(8) << std::setfill('0') << hex << states4[lane][k];
-                    //     }
-                    //     cout << endl;
-                    // }
-
-                    bucket.clear();
-                }
-            }
-
-            // 每个桶最后不足 4 个的尾巴，用串行补算
-            for (auto& kv : buckets)
-            {
-                FlushBucketRemainder(kv.second);
-            }
-
-            // 在这里对哈希所需的总时长进行计算
-            auto end_hash = system_clock::now();
-            auto duration = duration_cast<microseconds>(end_hash - start_hash);
-            time_hash += double(duration.count()) * microseconds::period::num / microseconds::period::den;
-
-            // 记录已经生成的口令总数
-            history += curr_num;
-            curr_num = 0;
-            q.guesses.clear();
+            HashAndClearGuesses(q, time_hash, total_one_block_batches, total_general_batches);
         }
     }
+    auto end_guess = system_clock::now();
+    auto duration_guess = duration_cast<microseconds>(end_guess - start_guess);
+    time_guess = double(duration_guess.count()) * microseconds::period::num / microseconds::period::den;
+
+    HashAndClearGuesses(q, time_hash, total_one_block_batches, total_general_batches);
+
+    cout << "one_block_batches=" << total_one_block_batches << endl;
+    cout << "general_batches=" << total_general_batches << endl;
+    cout << "total_guesses = " << benchmark_total_guesses << endl;
+    cout << "Guess benchmark time:" << time_guess - time_hash << "seconds" << endl;
+    cout << "Hash time:" << time_hash << "seconds" << endl;
+    cout << "Train time:" << time_train << "seconds" << endl;
+    q.PrintGenerateStats();
 
     return 0;
 }
