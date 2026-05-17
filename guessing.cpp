@@ -1,4 +1,7 @@
 #include "PCFG.h"
+#ifdef ENABLE_OPENMP_GENERATE
+#include <omp.h>
+#endif
 using namespace std;
 
 void PriorityQueue::CalProb(PT &pt)
@@ -201,10 +204,31 @@ void PriorityQueue::Generate(PT pt)
         return nullptr;
     };
 
-    auto appendSegmentValuesSerial = [this](const string& prefix, segment* a, int n)
+    const int PARALLEL_THRESHOLD = 4096;
+
+    auto appendSegmentValues = [this, PARALLEL_THRESHOLD](const string& prefix, segment* a, int n)
     {
         size_t base = guesses.size();
         guesses.resize(base + n);
+#if defined(ENABLE_OPENMP_GENERATE) && defined(_OPENMP)
+        if (n >= PARALLEL_THRESHOLD)
+        {
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < n; ++i)
+            {
+                if (prefix.empty())
+                {
+                    guesses[base + i] = a->ordered_values[i];
+                }
+                else
+                {
+                    guesses[base + i] = prefix + a->ordered_values[i];
+                }
+            }
+            total_guesses += n;
+            return;
+        }
+#endif
         for (int i = 0; i < n; i += 1)
         {
             if (prefix.empty())
@@ -230,7 +254,7 @@ void PriorityQueue::Generate(PT pt)
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
-        appendSegmentValuesSerial("", a, pt.max_indices[0]);
+        appendSegmentValues("", a, pt.max_indices[0]);
     }
     else
     {
@@ -267,6 +291,6 @@ void PriorityQueue::Generate(PT pt)
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
-        appendSegmentValuesSerial(guess, a, pt.max_indices[pt.content.size() - 1]);
+        appendSegmentValues(guess, a, pt.max_indices[pt.content.size() - 1]);
     }
 }
