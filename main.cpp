@@ -11,6 +11,11 @@
 using namespace std;
 using namespace chrono;
 
+static inline double SecondsBetween(steady_clock::time_point start, steady_clock::time_point end)
+{
+    return duration<double>(end - start).count();
+}
+
 static inline size_t GetMD5BlockCount(const string& s)
 {
     size_t total = s.size() + 1 + 8;
@@ -64,14 +69,14 @@ static string ResolveTrainPath(const string& requested_path)
     return candidates.back();
 }
 
-static void HashAndClearGuesses(PriorityQueue& q, double& time_hash, size_t& total_one_block_batches, size_t& total_general_batches)
+static void HashAndClearGuesses(PriorityQueue& q, double& hash_time_sec, size_t& total_one_block_batches, size_t& total_general_batches)
 {
     if (q.guesses.empty())
     {
         return;
     }
 
-    auto start_hash = system_clock::now();
+    auto hash_start = steady_clock::now();
     unordered_map<size_t, vector<string>> buckets;
     bit32 states4[4][4];
 
@@ -103,9 +108,8 @@ static void HashAndClearGuesses(PriorityQueue& q, double& time_hash, size_t& tot
         FlushBucketRemainder(kv.second);
     }
 
-    auto end_hash = system_clock::now();
-    auto duration = duration_cast<microseconds>(end_hash - start_hash);
-    time_hash += double(duration.count()) * microseconds::period::num / microseconds::period::den;
+    auto hash_end = steady_clock::now();
+    hash_time_sec += SecondsBetween(hash_start, hash_end);
 
     q.guesses.clear();
     q.total_guesses = 0;
@@ -179,9 +183,9 @@ int main(int argc, char* argv[])
 
     cout << "MD5Hash test passed!" << endl; // Please do not modify this line.
 
-    double time_hash = 0;
-    double time_guess = 0;
-    double time_train = 0;
+    double hash_time_sec = 0;
+    double guess_loop_time_sec = 0;
+    double train_time_sec = 0;
 
     const int DEFAULT_BENCHMARK_ROUNDS = 1000;
     const size_t HASH_FLUSH_THRESHOLD = 1000000;
@@ -215,14 +219,13 @@ int main(int argc, char* argv[])
 
     PriorityQueue q;
 
-    auto start_train = system_clock::now();
     cout << "Training dataset: " << train_path << endl;
     cout << "Guess benchmark rounds: " << benchmark_rounds << endl;
+    auto train_start = steady_clock::now();
     q.m.train(train_path);
     q.m.order();
-    auto end_train = system_clock::now();
-    auto duration_train = duration_cast<microseconds>(end_train - start_train);
-    time_train = double(duration_train.count()) * microseconds::period::num / microseconds::period::den;
+    auto train_end = steady_clock::now();
+    train_time_sec = SecondsBetween(train_start, train_end);
 
     q.init();
     cout << "Initial priority size: " << q.priority.size() << endl;
@@ -231,7 +234,7 @@ int main(int argc, char* argv[])
     size_t total_general_batches = 0;
     long long benchmark_total_guesses = 0;
 
-    auto start_guess = system_clock::now();
+    auto guess_loop_start = steady_clock::now();
     for (int round = 0; round < benchmark_rounds && !q.priority.empty(); round += 1)
     {
         size_t before = q.guesses.size();
@@ -246,21 +249,21 @@ int main(int argc, char* argv[])
 
         if (q.guesses.size() >= HASH_FLUSH_THRESHOLD)
         {
-            HashAndClearGuesses(q, time_hash, total_one_block_batches, total_general_batches);
+            HashAndClearGuesses(q, hash_time_sec, total_one_block_batches, total_general_batches);
         }
     }
-    auto end_guess = system_clock::now();
-    auto duration_guess = duration_cast<microseconds>(end_guess - start_guess);
-    time_guess = double(duration_guess.count()) * microseconds::period::num / microseconds::period::den;
 
-    HashAndClearGuesses(q, time_hash, total_one_block_batches, total_general_batches);
+    HashAndClearGuesses(q, hash_time_sec, total_one_block_batches, total_general_batches);
+    auto guess_loop_end = steady_clock::now();
+    guess_loop_time_sec = SecondsBetween(guess_loop_start, guess_loop_end);
 
     cout << "one_block_batches=" << total_one_block_batches << endl;
     cout << "general_batches=" << total_general_batches << endl;
     cout << "total_guesses = " << benchmark_total_guesses << endl;
-    cout << "Guess benchmark time:" << time_guess - time_hash << "seconds" << endl;
-    cout << "Hash time:" << time_hash << "seconds" << endl;
-    cout << "Train time:" << time_train << "seconds" << endl;
+    cout << fixed << setprecision(6);
+    cout << "Guess benchmark time:" << guess_loop_time_sec << "seconds" << endl;
+    cout << "Hash time:" << hash_time_sec << "seconds" << endl;
+    cout << "Train time:" << train_time_sec << "seconds" << endl;
     q.PrintGenerateStats();
 
     return 0;

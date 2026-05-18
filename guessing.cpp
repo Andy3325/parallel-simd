@@ -1,9 +1,61 @@
 #include "PCFG.h"
+#if defined(ENABLE_OPENMP_GENERATE) && defined(ENABLE_PTHREAD_GENERATE)
+#error "Do not enable both ENABLE_OPENMP_GENERATE and ENABLE_PTHREAD_GENERATE"
+#endif
 #ifdef ENABLE_OPENMP_GENERATE
 #include <omp.h>
 #endif
+#ifdef ENABLE_PTHREAD_GENERATE
+#include <pthread.h>
+#include <cstdlib>
+#endif
 #include <chrono>
 using namespace std;
+
+#ifdef ENABLE_PTHREAD_GENERATE
+struct PthreadGenerateTask
+{
+    vector<string>* guesses;
+    const string* prefix;
+    segment* values;
+    size_t base;
+    int begin;
+    int end;
+};
+
+static void* PthreadGenerateWorker(void* arg)
+{
+    PthreadGenerateTask* task = static_cast<PthreadGenerateTask*>(arg);
+    vector<string>& guesses = *task->guesses;
+    const string& prefix = *task->prefix;
+    segment* values = task->values;
+
+    for (int i = task->begin; i < task->end; ++i)
+    {
+        if (prefix.empty())
+        {
+            guesses[task->base + i] = values->ordered_values[i];
+        }
+        else
+        {
+            guesses[task->base + i] = prefix + values->ordered_values[i];
+        }
+    }
+
+    return nullptr;
+}
+
+static int GetPthreadGenerateThreadCount()
+{
+    const char* env = std::getenv("PTHREAD_NUM_THREADS");
+    int thread_count = env == nullptr ? 4 : std::atoi(env);
+    if (thread_count < 1)
+    {
+        thread_count = 1;
+    }
+    return thread_count;
+}
+#endif
 
 void PriorityQueue::CalProb(PT &pt)
 {
@@ -218,6 +270,35 @@ void PriorityQueue::Generate(PT pt)
 
         size_t base = guesses.size();
         guesses.resize(base + n);
+#if defined(ENABLE_PTHREAD_GENERATE)
+        if (n >= PARALLEL_THRESHOLD)
+        {
+            append_parallel_calls += 1;
+            append_parallel_items += n;
+
+            int thread_count = GetPthreadGenerateThreadCount();
+            vector<pthread_t> threads(thread_count);
+            vector<PthreadGenerateTask> tasks(thread_count);
+
+            for (int t = 0; t < thread_count; ++t)
+            {
+                int begin = t * n / thread_count;
+                int end = (t + 1) * n / thread_count;
+                tasks[t] = {&guesses, &prefix, a, base, begin, end};
+                pthread_create(&threads[t], nullptr, PthreadGenerateWorker, &tasks[t]);
+            }
+
+            for (int t = 0; t < thread_count; ++t)
+            {
+                pthread_join(threads[t], nullptr);
+            }
+
+            total_guesses += n;
+            auto append_end = std::chrono::high_resolution_clock::now();
+            append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+            return;
+        }
+#endif
 #if defined(ENABLE_OPENMP_GENERATE) && defined(_OPENMP)
         if (n >= PARALLEL_THRESHOLD)
         {
