@@ -142,6 +142,7 @@ class PriorityQueue
 public:
     // 用vector实现的priority queue
     vector<PT> priority;
+    size_t priority_head = 0;
 
     // 模型作为成员，辅助猜测生成
     model m;
@@ -168,6 +169,14 @@ public:
     long long append_parallel_calls = 0;
     long long append_total_items = 0;
     long long append_parallel_items = 0;
+    long long popnext_calls = 0;
+    long long new_pts_count = 0;
     double generate_time_sec = 0.0;
     double append_time_sec = 0.0;
+    double popnext_time_sec = 0.0;
+    double generate_in_popnext_time_sec = 0.0;
+    double newpts_time_sec = 0.0;
+    double calprob_time_sec = 0.0;
+    double priority_insert_time_sec = 0.0;
+    double priority_erase_time_sec = 0.0;
 };

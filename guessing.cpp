@@ -9,6 +9,9 @@
 #include <pthread.h>
 #include <cstdlib>
 #endif
+#ifndef GENERATE_PARALLEL_THRESHOLD
+#define GENERATE_PARALLEL_THRESHOLD 4096
+#endif
 #include <chrono>
 using namespace std;
 
@@ -108,6 +111,16 @@ void PriorityQueue::CalProb(PT &pt)
 
 void PriorityQueue::init()
 {
+    priority_head = 0;
+    popnext_calls = 0;
+    new_pts_count = 0;
+    popnext_time_sec = 0.0;
+    generate_in_popnext_time_sec = 0.0;
+    newpts_time_sec = 0.0;
+    calprob_time_sec = 0.0;
+    priority_insert_time_sec = 0.0;
+    priority_erase_time_sec = 0.0;
+
     // cout << m.ordered_pts.size() << endl;
     // 用所有可能的PT，按概率降序填满整个优先队列
     for (PT pt : m.ordered_pts)
@@ -147,17 +160,109 @@ void PriorityQueue::init()
 
 void PriorityQueue::PopNext()
 {
+    popnext_calls += 1;
+    auto popnext_start = std::chrono::steady_clock::now();
+
+#ifdef ENABLE_PRIORITY_LAZY_OPT
+    if (priority_head >= priority.size())
+    {
+        priority.clear();
+        priority_head = 0;
+        auto popnext_end = std::chrono::steady_clock::now();
+        popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+        return;
+    }
+
+    PT current = priority[priority_head];
 
     // 对优先队列最前面的PT，首先利用这个PT生成一系列猜测
-    Generate(priority.front());
+    auto generate_in_popnext_start = std::chrono::steady_clock::now();
+    Generate(current);
+    auto generate_in_popnext_end = std::chrono::steady_clock::now();
+    generate_in_popnext_time_sec += std::chrono::duration<double>(generate_in_popnext_end - generate_in_popnext_start).count();
 
     // 然后需要根据即将出队的PT，生成一系列新的PT
-    vector<PT> new_pts = priority.front().NewPTs();
+    auto newpts_start = std::chrono::steady_clock::now();
+    vector<PT> new_pts = current.NewPTs();
+    auto newpts_end = std::chrono::steady_clock::now();
+    newpts_time_sec += std::chrono::duration<double>(newpts_end - newpts_start).count();
+    new_pts_count += new_pts.size();
     for (PT pt : new_pts)
     {
         // 计算概率
+        auto calprob_start = std::chrono::steady_clock::now();
         CalProb(pt);
+        auto calprob_end = std::chrono::steady_clock::now();
+        calprob_time_sec += std::chrono::duration<double>(calprob_end - calprob_start).count();
         // 接下来的这个循环，作用是根据概率，将新的PT插入到优先队列中
+        auto priority_insert_start = std::chrono::steady_clock::now();
+        auto active_begin = priority.begin() + priority_head;
+        for (auto iter = active_begin; iter != priority.end(); iter++)
+        {
+            // 复用原 sorted-vector 的插入判定，只把 begin 改成逻辑队首。
+            if (iter != priority.end() - 1 && iter != active_begin)
+            {
+                if (pt.prob <= iter->prob && pt.prob > (iter + 1)->prob)
+                {
+                    priority.emplace(iter + 1, pt);
+                    break;
+                }
+            }
+            if (iter == priority.end() - 1)
+            {
+                priority.emplace_back(pt);
+                break;
+            }
+            if (iter == active_begin && iter->prob < pt.prob)
+            {
+                priority.emplace(iter, pt);
+                break;
+            }
+        }
+        auto priority_insert_end = std::chrono::steady_clock::now();
+        priority_insert_time_sec += std::chrono::duration<double>(priority_insert_end - priority_insert_start).count();
+    }
+
+    // 现在队首的PT善后工作已经结束，将其出队（删除）
+    auto priority_erase_start = std::chrono::steady_clock::now();
+    priority_head += 1;
+    if (priority_head >= priority.size())
+    {
+        priority.clear();
+        priority_head = 0;
+    }
+    else if (priority_head > 4096 && priority_head * 2 > priority.size())
+    {
+        priority.erase(priority.begin(), priority.begin() + priority_head);
+        priority_head = 0;
+    }
+    auto priority_erase_end = std::chrono::steady_clock::now();
+    priority_erase_time_sec += std::chrono::duration<double>(priority_erase_end - priority_erase_start).count();
+
+    auto popnext_end = std::chrono::steady_clock::now();
+    popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+#else
+    // 对优先队列最前面的PT，首先利用这个PT生成一系列猜测
+    auto generate_in_popnext_start = std::chrono::steady_clock::now();
+    Generate(priority.front());
+    auto generate_in_popnext_end = std::chrono::steady_clock::now();
+    generate_in_popnext_time_sec += std::chrono::duration<double>(generate_in_popnext_end - generate_in_popnext_start).count();
+
+    // 然后需要根据即将出队的PT，生成一系列新的PT
+    auto newpts_start = std::chrono::steady_clock::now();
+    vector<PT> new_pts = priority.front().NewPTs();
+    auto newpts_end = std::chrono::steady_clock::now();
+    newpts_time_sec += std::chrono::duration<double>(newpts_end - newpts_start).count();
+    new_pts_count += new_pts.size();
+    for (PT pt : new_pts)
+    {
+        // 计算概率
+        auto calprob_start = std::chrono::steady_clock::now();
+        CalProb(pt);
+        auto calprob_end = std::chrono::steady_clock::now();
+        calprob_time_sec += std::chrono::duration<double>(calprob_end - calprob_start).count();
+        // 接下来的这个循环，作用是根据概率，将新的PT插入到优先队列中
+        auto priority_insert_start = std::chrono::steady_clock::now();
         for (auto iter = priority.begin(); iter != priority.end(); iter++)
         {
             // 对于非队首和队尾的特殊情况
@@ -181,10 +286,19 @@ void PriorityQueue::PopNext()
                 break;
             }
         }
+        auto priority_insert_end = std::chrono::steady_clock::now();
+        priority_insert_time_sec += std::chrono::duration<double>(priority_insert_end - priority_insert_start).count();
     }
 
     // 现在队首的PT善后工作已经结束，将其出队（删除）
+    auto priority_erase_start = std::chrono::steady_clock::now();
     priority.erase(priority.begin());
+    auto priority_erase_end = std::chrono::steady_clock::now();
+    priority_erase_time_sec += std::chrono::duration<double>(priority_erase_end - priority_erase_start).count();
+
+    auto popnext_end = std::chrono::steady_clock::now();
+    popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+#endif
 }
 
 // 这个函数你就算看不懂，对并行算法的实现影响也不大
@@ -260,7 +374,7 @@ void PriorityQueue::Generate(PT pt)
         return nullptr;
     };
 
-    const int PARALLEL_THRESHOLD = 4096;
+    const int PARALLEL_THRESHOLD = GENERATE_PARALLEL_THRESHOLD;
 
     auto appendSegmentValues = [this, PARALLEL_THRESHOLD](const string& prefix, segment* a, int n)
     {
@@ -405,4 +519,18 @@ void PriorityQueue::PrintGenerateStats() const
     cout << "append_parallel_items = " << append_parallel_items << endl;
     cout << "generate_time_sec = " << generate_time_sec << endl;
     cout << "append_time_sec = " << append_time_sec << endl;
+    cout << "[PopNextStats]" << endl;
+#ifdef ENABLE_PRIORITY_LAZY_OPT
+    cout << "priority_queue_mode = sorted_vector_lazy" << endl;
+#else
+    cout << "priority_queue_mode = sorted_vector" << endl;
+#endif
+    cout << "popnext_calls = " << popnext_calls << endl;
+    cout << "new_pts_count = " << new_pts_count << endl;
+    cout << "popnext_time_sec = " << popnext_time_sec << endl;
+    cout << "generate_in_popnext_time_sec = " << generate_in_popnext_time_sec << endl;
+    cout << "newpts_time_sec = " << newpts_time_sec << endl;
+    cout << "calprob_time_sec = " << calprob_time_sec << endl;
+    cout << "priority_insert_time_sec = " << priority_insert_time_sec << endl;
+    cout << "priority_erase_time_sec = " << priority_erase_time_sec << endl;
 }
