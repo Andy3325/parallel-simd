@@ -11,6 +11,9 @@
 #if defined(ENABLE_RELAXED_BATCH_POPNEXT) && !defined(_OPENMP)
 #error "ENABLE_RELAXED_BATCH_POPNEXT requires OpenMP"
 #endif
+#if defined(ENABLE_RELAXED_BATCH_PREFIX_CACHE) && !defined(ENABLE_RELAXED_BATCH_POPNEXT)
+#error "ENABLE_RELAXED_BATCH_PREFIX_CACHE requires ENABLE_RELAXED_BATCH_POPNEXT"
+#endif
 #if defined(ENABLE_OPENMP_GENERATE) || defined(ENABLE_RELAXED_BATCH_POPNEXT)
 #include <omp.h>
 #endif
@@ -42,6 +45,15 @@ struct GenerateChunkTask
     size_t end;
     size_t output_base;
 };
+
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+struct PTGenerateView
+{
+    string prefix;
+    const vector<string>* values;
+    size_t count;
+};
+#endif
 
 static int GetClampedEnvInt(const char* name, int default_value, int min_value, int max_value)
 {
@@ -80,6 +92,14 @@ static size_t GetRelaxedChunkSize()
 {
     return static_cast<size_t>(GetClampedEnvInt("RELAXED_CHUNK_SIZE", 8192, 1024, 65536));
 }
+
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+static PTGenerateView BuildPTGenerateView(model& m, const PT& pt);
+static void GenerateToRangeChunkCached(const PTGenerateView& view, vector<string>& dst, size_t output_base, size_t begin, size_t end);
+#ifdef DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV
+static void DebugCheckPrefixCacheEquiv(PriorityQueue& q, const vector<PT>& pts, const vector<PTGenerateView>& views);
+#endif
+#endif
 
 #endif
 
@@ -247,6 +267,9 @@ void PriorityQueue::PopNext()
 
     vector<PT> batch;
     vector<size_t> counts;
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+    vector<PTGenerateView> views;
+#endif
     int max_batch_pt = GetRelaxedBatchMaxPT();
     size_t target_guesses = GetRelaxedBatchTargetGuesses();
     size_t chunk_size = GetRelaxedChunkSize();
@@ -272,6 +295,21 @@ void PriorityQueue::PopNext()
     }
     auto priority_erase_end = std::chrono::steady_clock::now();
     priority_erase_time_sec += std::chrono::duration<double>(priority_erase_end - priority_erase_start).count();
+
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+    views.reserve(batch.size());
+    counts.clear();
+    batch_generated = 0;
+    for (const PT& pt : batch)
+    {
+        views.push_back(BuildPTGenerateView(m, pt));
+        counts.push_back(views.back().count);
+        batch_generated += views.back().count;
+    }
+#ifdef DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV
+    DebugCheckPrefixCacheEquiv(*this, batch, views);
+#endif
+#endif
 
     auto generate_in_popnext_start = std::chrono::steady_clock::now();
     vector<size_t> offsets(batch.size());
@@ -305,7 +343,11 @@ void PriorityQueue::PopNext()
     for (int i = 0; i < static_cast<int>(chunk_tasks.size()); ++i)
     {
         const GenerateChunkTask& task = chunk_tasks[i];
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+        GenerateToRangeChunkCached(views[task.pt_index], guesses, task.output_base, task.begin, task.end);
+#else
         GenerateToRangeChunk(batch[task.pt_index], guesses, task.output_base, task.begin, task.end);
+#endif
     }
     auto append_end = std::chrono::steady_clock::now();
     auto generate_in_popnext_end = std::chrono::steady_clock::now();
@@ -583,6 +625,113 @@ size_t PriorityQueue::CountGeneratedGuesses(const PT& pt)
     }
     return static_cast<size_t>(pt.max_indices[pt.content.size() - 1]);
 }
+
+#if defined(ENABLE_RELAXED_BATCH_POPNEXT) && defined(ENABLE_RELAXED_BATCH_PREFIX_CACHE)
+static segment* GetSegmentValuesForPrefixCache(model& m, const segment& seg)
+{
+    if (seg.type == 1)
+    {
+        return &m.letters[m.FindLetter(seg)];
+    }
+    if (seg.type == 2)
+    {
+        return &m.digits[m.FindDigit(seg)];
+    }
+    if (seg.type == 3)
+    {
+        return &m.symbols[m.FindSymbol(seg)];
+    }
+    return nullptr;
+}
+
+static PTGenerateView BuildPTGenerateView(model& m, const PT& pt)
+{
+    PTGenerateView view;
+    view.values = nullptr;
+    view.count = 0;
+
+    if (pt.content.empty() || pt.max_indices.size() < pt.content.size())
+    {
+        return view;
+    }
+
+    if (pt.content.size() > 1)
+    {
+        int seg_idx = 0;
+        for (int idx : pt.curr_indices)
+        {
+            segment* fixed_values = GetSegmentValuesForPrefixCache(m, pt.content[seg_idx]);
+            if (fixed_values != nullptr)
+            {
+                view.prefix += fixed_values->ordered_values[idx];
+            }
+            seg_idx += 1;
+            if (seg_idx == pt.content.size() - 1)
+            {
+                break;
+            }
+        }
+    }
+
+    segment* last_values = GetSegmentValuesForPrefixCache(m, pt.content[pt.content.size() - 1]);
+    if (last_values != nullptr)
+    {
+        view.values = &last_values->ordered_values;
+        view.count = static_cast<size_t>(pt.max_indices[pt.content.size() - 1]);
+    }
+    return view;
+}
+
+static void GenerateToRangeChunkCached(const PTGenerateView& view, vector<string>& dst, size_t output_base, size_t begin, size_t end)
+{
+    if (view.values == nullptr || begin >= end || end > view.count)
+    {
+        return;
+    }
+
+    const vector<string>& values = *view.values;
+    for (size_t idx = begin; idx < end; ++idx)
+    {
+        if (view.prefix.empty())
+        {
+            dst[output_base + idx - begin] = values[idx];
+        }
+        else
+        {
+            dst[output_base + idx - begin] = view.prefix + values[idx];
+        }
+    }
+}
+
+#ifdef DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV
+static void DebugCheckPrefixCacheEquiv(PriorityQueue& q, const vector<PT>& pts, const vector<PTGenerateView>& views)
+{
+    for (size_t pt_index = 0; pt_index < pts.size(); ++pt_index)
+    {
+        vector<string> ref;
+        q.GenerateToVector(pts[pt_index], ref);
+        if (views[pt_index].count != ref.size())
+        {
+            cerr << "[DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV] count mismatch pt=" << pt_index
+                 << " cached=" << views[pt_index].count << " ref=" << ref.size() << endl;
+            continue;
+        }
+
+        vector<string> got(ref.size());
+        GenerateToRangeChunkCached(views[pt_index], got, 0, 0, views[pt_index].count);
+        for (size_t i = 0; i < ref.size(); ++i)
+        {
+            if (got[i] != ref[i])
+            {
+                cerr << "[DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV] value mismatch pt=" << pt_index
+                     << " idx=" << i << endl;
+                break;
+            }
+        }
+    }
+}
+#endif
+#endif
 
 void PriorityQueue::GenerateToRangeChunk(const PT& pt, vector<string>& dst, size_t output_base, size_t begin, size_t end)
 {
