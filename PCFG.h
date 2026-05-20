@@ -155,6 +155,10 @@ public:
 
     // 对优先队列的一个PT，生成所有guesses
     void Generate(PT pt);
+    void GenerateToVector(PT pt, vector<string>& out);
+    size_t CountGeneratedGuesses(const PT& pt);
+    void GenerateToRange(const PT& pt, vector<string>& dst, size_t base);
+    void GenerateToRangeChunk(const PT& pt, vector<string>& dst, size_t output_base, size_t begin, size_t end);
 
     void PrintGenerateStats() const;
 
