@@ -96,9 +96,6 @@ static size_t GetRelaxedChunkSize()
 #ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
 static PTGenerateView BuildPTGenerateView(model& m, const PT& pt);
 static void GenerateToRangeChunkCached(const PTGenerateView& view, vector<string>& dst, size_t output_base, size_t begin, size_t end);
-#ifdef DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV
-static void DebugCheckPrefixCacheEquiv(PriorityQueue& q, const vector<PT>& pts, const vector<PTGenerateView>& views);
-#endif
 #endif
 
 #endif
@@ -306,9 +303,6 @@ void PriorityQueue::PopNext()
         counts.push_back(views.back().count);
         batch_generated += views.back().count;
     }
-#ifdef DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV
-    DebugCheckPrefixCacheEquiv(*this, batch, views);
-#endif
 #endif
 
     auto generate_in_popnext_start = std::chrono::steady_clock::now();
@@ -703,34 +697,6 @@ static void GenerateToRangeChunkCached(const PTGenerateView& view, vector<string
     }
 }
 
-#ifdef DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV
-static void DebugCheckPrefixCacheEquiv(PriorityQueue& q, const vector<PT>& pts, const vector<PTGenerateView>& views)
-{
-    for (size_t pt_index = 0; pt_index < pts.size(); ++pt_index)
-    {
-        vector<string> ref;
-        q.GenerateToVector(pts[pt_index], ref);
-        if (views[pt_index].count != ref.size())
-        {
-            cerr << "[DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV] count mismatch pt=" << pt_index
-                 << " cached=" << views[pt_index].count << " ref=" << ref.size() << endl;
-            continue;
-        }
-
-        vector<string> got(ref.size());
-        GenerateToRangeChunkCached(views[pt_index], got, 0, 0, views[pt_index].count);
-        for (size_t i = 0; i < ref.size(); ++i)
-        {
-            if (got[i] != ref[i])
-            {
-                cerr << "[DEBUG_RELAXED_BATCH_PREFIX_CACHE_EQUIV] value mismatch pt=" << pt_index
-                     << " idx=" << i << endl;
-                break;
-            }
-        }
-    }
-}
-#endif
 #endif
 
 void PriorityQueue::GenerateToRangeChunk(const PT& pt, vector<string>& dst, size_t output_base, size_t begin, size_t end)
