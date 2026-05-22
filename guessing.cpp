@@ -888,6 +888,64 @@ void PriorityQueue::Generate(PT pt)
         append_total_items += n;
         auto append_start = std::chrono::high_resolution_clock::now();
 
+#ifdef ENABLE_LAZY_GUESS_REF
+        {
+        bool has_prefix = !prefix.empty();
+        size_t prefix_id = has_prefix ? guesses.add_prefix(prefix) : 0;
+        size_t base = guesses.refs.size();
+        guesses.refs.resize(base + n);
+#if defined(ENABLE_OPENMP_GENERATE) && defined(_OPENMP)
+        if (n >= PARALLEL_THRESHOLD)
+        {
+            append_parallel_calls += 1;
+            append_parallel_items += n;
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < n; ++i)
+            {
+                guesses.refs[base + i] = {prefix_id, &a->ordered_values, i, has_prefix};
+            }
+            total_guesses += n;
+            auto append_end = std::chrono::high_resolution_clock::now();
+            append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+#ifdef DEBUG_LAZY_GUESS_EQUIV
+            for (int i = 0; i < n; ++i)
+            {
+                string ref = has_prefix ? prefix + a->ordered_values[i] : a->ordered_values[i];
+                string got = guesses.materialize(base + i);
+                if (ref != got)
+                {
+                    cerr << "[DEBUG_LAZY_GUESS_EQUIV] value mismatch idx=" << i << endl;
+                    break;
+                }
+            }
+#endif
+            return;
+        }
+#endif
+        append_serial_calls += 1;
+        for (int i = 0; i < n; i += 1)
+        {
+            guesses.refs[base + i] = {prefix_id, &a->ordered_values, i, has_prefix};
+        }
+        total_guesses += n;
+        auto append_end = std::chrono::high_resolution_clock::now();
+        append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+#ifdef DEBUG_LAZY_GUESS_EQUIV
+        for (int i = 0; i < n; ++i)
+        {
+            string ref = has_prefix ? prefix + a->ordered_values[i] : a->ordered_values[i];
+            string got = guesses.materialize(base + i);
+            if (ref != got)
+            {
+                cerr << "[DEBUG_LAZY_GUESS_EQUIV] value mismatch idx=" << i << endl;
+                break;
+            }
+        }
+#endif
+        return;
+        }
+#endif
+
         size_t base = guesses.size();
         guesses.resize(base + n);
 #if defined(ENABLE_PTHREAD_GENERATE)
