@@ -1,5 +1,155 @@
 #include "PCFG.h"
+#if defined(ENABLE_OPENMP_GENERATE) && defined(ENABLE_PTHREAD_GENERATE)
+#error "Do not enable both ENABLE_OPENMP_GENERATE and ENABLE_PTHREAD_GENERATE"
+#endif
+#if defined(ENABLE_PRIORITY_LAZY_OPT) && defined(ENABLE_RELAXED_HEAP_PRIORITY)
+#error "Do not enable both ENABLE_PRIORITY_LAZY_OPT and ENABLE_RELAXED_HEAP_PRIORITY"
+#endif
+#if defined(ENABLE_RELAXED_BATCH_POPNEXT) && (defined(ENABLE_PRIORITY_LAZY_OPT) || defined(ENABLE_RELAXED_HEAP_PRIORITY))
+#error "Do not enable ENABLE_RELAXED_BATCH_POPNEXT with ENABLE_PRIORITY_LAZY_OPT or ENABLE_RELAXED_HEAP_PRIORITY"
+#endif
+#if defined(ENABLE_LAZY_GUESS_REF) && defined(ENABLE_LAZY_GUESS_BLOCK)
+#error "ENABLE_LAZY_GUESS_REF and ENABLE_LAZY_GUESS_BLOCK are mutually exclusive"
+#endif
+#if defined(ENABLE_RELAXED_BATCH_POPNEXT) && defined(ENABLE_LAZY_GUESS_BLOCK)
+#error "ENABLE_LAZY_GUESS_BLOCK is currently supported only without ENABLE_RELAXED_BATCH_POPNEXT"
+#endif
+#if defined(ENABLE_RELAXED_BATCH_POPNEXT) && !defined(_OPENMP)
+#error "ENABLE_RELAXED_BATCH_POPNEXT requires OpenMP"
+#endif
+#if defined(ENABLE_RELAXED_BATCH_PREFIX_CACHE) && !defined(ENABLE_RELAXED_BATCH_POPNEXT)
+#error "ENABLE_RELAXED_BATCH_PREFIX_CACHE requires ENABLE_RELAXED_BATCH_POPNEXT"
+#endif
+#if defined(ENABLE_OPENMP_GENERATE) || defined(ENABLE_RELAXED_BATCH_POPNEXT)
+#include <omp.h>
+#endif
+#ifdef ENABLE_PTHREAD_GENERATE
+#include <pthread.h>
+#endif
+#if defined(ENABLE_PTHREAD_GENERATE) || defined(ENABLE_RELAXED_BATCH_POPNEXT)
+#include <cstdlib>
+#endif
+#ifndef GENERATE_PARALLEL_THRESHOLD
+#define GENERATE_PARALLEL_THRESHOLD 4096
+#endif
+#include <algorithm>
+#include <chrono>
 using namespace std;
+
+#if defined(ENABLE_RELAXED_HEAP_PRIORITY) || defined(ENABLE_RELAXED_BATCH_POPNEXT)
+static bool PTProbLess(const PT& lhs, const PT& rhs)
+{
+    return lhs.prob < rhs.prob;
+}
+#endif
+
+#ifdef ENABLE_RELAXED_BATCH_POPNEXT
+struct GenerateChunkTask
+{
+    int pt_index;
+    size_t begin;
+    size_t end;
+    size_t output_base;
+};
+
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+struct PTGenerateView
+{
+    string prefix;
+    const vector<string>* values;
+    size_t count;
+};
+#endif
+
+static int GetClampedEnvInt(const char* name, int default_value, int min_value, int max_value)
+{
+    const char* env = std::getenv(name);
+    int value = env == nullptr ? default_value : std::atoi(env);
+    if (value < min_value)
+    {
+        value = min_value;
+    }
+    if (value > max_value)
+    {
+        value = max_value;
+    }
+    return value;
+}
+
+static int GetRelaxedBatchMaxPT()
+{
+    if (std::getenv("RELAXED_BATCH_MAX_PT") != nullptr)
+    {
+        return GetClampedEnvInt("RELAXED_BATCH_MAX_PT", 128, 1, 512);
+    }
+    if (std::getenv("RELAXED_BATCH_SIZE") != nullptr)
+    {
+        return GetClampedEnvInt("RELAXED_BATCH_SIZE", 64, 1, 128);
+    }
+    return 128;
+}
+
+static size_t GetRelaxedBatchTargetGuesses()
+{
+    return static_cast<size_t>(GetClampedEnvInt("RELAXED_BATCH_TARGET_GUESSES", 200000, 10000, 1000000));
+}
+
+static size_t GetRelaxedChunkSize()
+{
+    return static_cast<size_t>(GetClampedEnvInt("RELAXED_CHUNK_SIZE", 8192, 1024, 65536));
+}
+
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+static PTGenerateView BuildPTGenerateView(model& m, const PT& pt);
+static void GenerateToRangeChunkCached(const PTGenerateView& view, vector<string>& dst, size_t output_base, size_t begin, size_t end);
+#endif
+
+#endif
+
+#ifdef ENABLE_PTHREAD_GENERATE
+struct PthreadGenerateTask
+{
+    vector<string>* guesses;
+    const string* prefix;
+    segment* values;
+    size_t base;
+    int begin;
+    int end;
+};
+
+static void* PthreadGenerateWorker(void* arg)
+{
+    PthreadGenerateTask* task = static_cast<PthreadGenerateTask*>(arg);
+    vector<string>& guesses = *task->guesses;
+    const string& prefix = *task->prefix;
+    segment* values = task->values;
+
+    for (int i = task->begin; i < task->end; ++i)
+    {
+        if (prefix.empty())
+        {
+            guesses[task->base + i] = values->ordered_values[i];
+        }
+        else
+        {
+            guesses[task->base + i] = prefix + values->ordered_values[i];
+        }
+    }
+
+    return nullptr;
+}
+
+static int GetPthreadGenerateThreadCount()
+{
+    const char* env = std::getenv("PTHREAD_NUM_THREADS");
+    int thread_count = env == nullptr ? 4 : std::atoi(env);
+    if (thread_count < 1)
+    {
+        thread_count = 1;
+    }
+    return thread_count;
+}
+#endif
 
 void PriorityQueue::CalProb(PT &pt)
 {
@@ -52,6 +202,19 @@ void PriorityQueue::CalProb(PT &pt)
 
 void PriorityQueue::init()
 {
+    priority_head = 0;
+    popnext_calls = 0;
+    new_pts_count = 0;
+    popnext_time_sec = 0.0;
+    generate_in_popnext_time_sec = 0.0;
+    newpts_time_sec = 0.0;
+    calprob_time_sec = 0.0;
+    priority_insert_time_sec = 0.0;
+    priority_erase_time_sec = 0.0;
+#ifdef ENABLE_RELAXED_BATCH_POPNEXT
+    guesses.reserve(12000000);
+#endif
+
     // cout << m.ordered_pts.size() << endl;
     // 用所有可能的PT，按概率降序填满整个优先队列
     for (PT pt : m.ordered_pts)
@@ -86,22 +249,292 @@ void PriorityQueue::init()
         // 将PT放入优先队列
         priority.emplace_back(pt);
     }
+#if defined(ENABLE_RELAXED_HEAP_PRIORITY) || defined(ENABLE_RELAXED_BATCH_POPNEXT)
+    make_heap(priority.begin(), priority.end(), PTProbLess);
+#endif
     // cout << "priority size:" << priority.size() << endl;
 }
 
 void PriorityQueue::PopNext()
 {
+    popnext_calls += 1;
+    auto popnext_start = std::chrono::steady_clock::now();
+
+#ifdef ENABLE_RELAXED_BATCH_POPNEXT
+    if (priority.empty())
+    {
+        auto popnext_end = std::chrono::steady_clock::now();
+        popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+        return;
+    }
+
+    vector<PT> batch;
+    vector<size_t> counts;
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+    vector<PTGenerateView> views;
+#endif
+    int max_batch_pt = GetRelaxedBatchMaxPT();
+    size_t target_guesses = GetRelaxedBatchTargetGuesses();
+    size_t chunk_size = GetRelaxedChunkSize();
+    batch.reserve(max_batch_pt);
+    counts.reserve(max_batch_pt);
+    size_t batch_generated = 0;
+
+    auto priority_erase_start = std::chrono::steady_clock::now();
+    while (!priority.empty())
+    {
+        pop_heap(priority.begin(), priority.end(), PTProbLess);
+        batch.emplace_back(priority.back());
+        priority.pop_back();
+
+        size_t cnt = CountGeneratedGuesses(batch.back());
+        counts.emplace_back(cnt);
+        batch_generated += cnt;
+
+        if (static_cast<int>(batch.size()) >= max_batch_pt || batch_generated >= target_guesses)
+        {
+            break;
+        }
+    }
+    auto priority_erase_end = std::chrono::steady_clock::now();
+    priority_erase_time_sec += std::chrono::duration<double>(priority_erase_end - priority_erase_start).count();
+
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+    views.reserve(batch.size());
+    counts.clear();
+    batch_generated = 0;
+    for (const PT& pt : batch)
+    {
+        views.push_back(BuildPTGenerateView(m, pt));
+        counts.push_back(views.back().count);
+        batch_generated += views.back().count;
+    }
+#endif
+
+    auto generate_in_popnext_start = std::chrono::steady_clock::now();
+    vector<size_t> offsets(batch.size());
+    vector<GenerateChunkTask> chunk_tasks;
+    chunk_tasks.reserve((batch_generated + chunk_size - 1) / chunk_size);
+    size_t running_offset = 0;
+    for (size_t i = 0; i < batch.size(); ++i)
+    {
+        offsets[i] = running_offset;
+        for (size_t begin = 0; begin < counts[i]; begin += chunk_size)
+        {
+            size_t end = begin + chunk_size;
+            if (end > counts[i])
+            {
+                end = counts[i];
+            }
+            chunk_tasks.push_back({static_cast<int>(i), begin, end, 0});
+        }
+        running_offset += counts[i];
+    }
+
+    size_t base = guesses.size();
+    for (GenerateChunkTask& task : chunk_tasks)
+    {
+        task.output_base = base + offsets[task.pt_index] + task.begin;
+    }
+
+    auto append_start = std::chrono::steady_clock::now();
+    guesses.resize(base + batch_generated);
+#pragma omp parallel for schedule(dynamic, 1)
+    for (int i = 0; i < static_cast<int>(chunk_tasks.size()); ++i)
+    {
+        const GenerateChunkTask& task = chunk_tasks[i];
+#ifdef ENABLE_RELAXED_BATCH_PREFIX_CACHE
+        GenerateToRangeChunkCached(views[task.pt_index], guesses, task.output_base, task.begin, task.end);
+#else
+        GenerateToRangeChunk(batch[task.pt_index], guesses, task.output_base, task.begin, task.end);
+#endif
+    }
+    auto append_end = std::chrono::steady_clock::now();
+    auto generate_in_popnext_end = std::chrono::steady_clock::now();
+    double batch_generate_time = std::chrono::duration<double>(generate_in_popnext_end - generate_in_popnext_start).count();
+    generate_in_popnext_time_sec += batch_generate_time;
+    generate_time_sec += batch_generate_time;
+    append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+    total_guesses += static_cast<int>(batch_generated);
+
+    generate_calls += static_cast<long long>(batch.size());
+    append_calls += static_cast<long long>(batch.size());
+    append_total_items += static_cast<long long>(batch_generated);
+    append_parallel_calls += static_cast<long long>(chunk_tasks.size());
+    append_parallel_items += static_cast<long long>(batch_generated);
+
+    vector<PT> new_pts_all;
+    auto newpts_start = std::chrono::steady_clock::now();
+    for (PT& current : batch)
+    {
+        vector<PT> new_pts = current.NewPTs();
+        new_pts_count += new_pts.size();
+        new_pts_all.insert(new_pts_all.end(), new_pts.begin(), new_pts.end());
+    }
+    auto newpts_end = std::chrono::steady_clock::now();
+    newpts_time_sec += std::chrono::duration<double>(newpts_end - newpts_start).count();
+
+    auto calprob_start = std::chrono::steady_clock::now();
+    for (PT& pt : new_pts_all)
+    {
+        CalProb(pt);
+    }
+    auto calprob_end = std::chrono::steady_clock::now();
+    calprob_time_sec += std::chrono::duration<double>(calprob_end - calprob_start).count();
+
+    auto priority_insert_start = std::chrono::steady_clock::now();
+    for (const PT& pt : new_pts_all)
+    {
+        priority.push_back(pt);
+        push_heap(priority.begin(), priority.end(), PTProbLess);
+    }
+    auto priority_insert_end = std::chrono::steady_clock::now();
+    priority_insert_time_sec += std::chrono::duration<double>(priority_insert_end - priority_insert_start).count();
+
+    auto popnext_end = std::chrono::steady_clock::now();
+    popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+#elif defined(ENABLE_RELAXED_HEAP_PRIORITY)
+    if (priority.empty())
+    {
+        auto popnext_end = std::chrono::steady_clock::now();
+        popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+        return;
+    }
+
+    auto priority_erase_start = std::chrono::steady_clock::now();
+    pop_heap(priority.begin(), priority.end(), PTProbLess);
+    PT current = priority.back();
+    priority.pop_back();
+    auto priority_erase_end = std::chrono::steady_clock::now();
+    priority_erase_time_sec += std::chrono::duration<double>(priority_erase_end - priority_erase_start).count();
+
+    auto generate_in_popnext_start = std::chrono::steady_clock::now();
+    Generate(current);
+    auto generate_in_popnext_end = std::chrono::steady_clock::now();
+    generate_in_popnext_time_sec += std::chrono::duration<double>(generate_in_popnext_end - generate_in_popnext_start).count();
+
+    auto newpts_start = std::chrono::steady_clock::now();
+    vector<PT> new_pts = current.NewPTs();
+    auto newpts_end = std::chrono::steady_clock::now();
+    newpts_time_sec += std::chrono::duration<double>(newpts_end - newpts_start).count();
+    new_pts_count += new_pts.size();
+
+    for (PT pt : new_pts)
+    {
+        auto calprob_start = std::chrono::steady_clock::now();
+        CalProb(pt);
+        auto calprob_end = std::chrono::steady_clock::now();
+        calprob_time_sec += std::chrono::duration<double>(calprob_end - calprob_start).count();
+
+        auto priority_insert_start = std::chrono::steady_clock::now();
+        priority.emplace_back(pt);
+        push_heap(priority.begin(), priority.end(), PTProbLess);
+        auto priority_insert_end = std::chrono::steady_clock::now();
+        priority_insert_time_sec += std::chrono::duration<double>(priority_insert_end - priority_insert_start).count();
+    }
+
+    auto popnext_end = std::chrono::steady_clock::now();
+    popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+#elif defined(ENABLE_PRIORITY_LAZY_OPT)
+    if (priority_head >= priority.size())
+    {
+        priority.clear();
+        priority_head = 0;
+        auto popnext_end = std::chrono::steady_clock::now();
+        popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+        return;
+    }
+
+    PT current = priority[priority_head];
 
     // 对优先队列最前面的PT，首先利用这个PT生成一系列猜测
-    Generate(priority.front());
+    auto generate_in_popnext_start = std::chrono::steady_clock::now();
+    Generate(current);
+    auto generate_in_popnext_end = std::chrono::steady_clock::now();
+    generate_in_popnext_time_sec += std::chrono::duration<double>(generate_in_popnext_end - generate_in_popnext_start).count();
 
     // 然后需要根据即将出队的PT，生成一系列新的PT
-    vector<PT> new_pts = priority.front().NewPTs();
+    auto newpts_start = std::chrono::steady_clock::now();
+    vector<PT> new_pts = current.NewPTs();
+    auto newpts_end = std::chrono::steady_clock::now();
+    newpts_time_sec += std::chrono::duration<double>(newpts_end - newpts_start).count();
+    new_pts_count += new_pts.size();
     for (PT pt : new_pts)
     {
         // 计算概率
+        auto calprob_start = std::chrono::steady_clock::now();
         CalProb(pt);
+        auto calprob_end = std::chrono::steady_clock::now();
+        calprob_time_sec += std::chrono::duration<double>(calprob_end - calprob_start).count();
         // 接下来的这个循环，作用是根据概率，将新的PT插入到优先队列中
+        auto priority_insert_start = std::chrono::steady_clock::now();
+        auto active_begin = priority.begin() + priority_head;
+        for (auto iter = active_begin; iter != priority.end(); iter++)
+        {
+            // 复用原 sorted-vector 的插入判定，只把 begin 改成逻辑队首。
+            if (iter != priority.end() - 1 && iter != active_begin)
+            {
+                if (pt.prob <= iter->prob && pt.prob > (iter + 1)->prob)
+                {
+                    priority.emplace(iter + 1, pt);
+                    break;
+                }
+            }
+            if (iter == priority.end() - 1)
+            {
+                priority.emplace_back(pt);
+                break;
+            }
+            if (iter == active_begin && iter->prob < pt.prob)
+            {
+                priority.emplace(iter, pt);
+                break;
+            }
+        }
+        auto priority_insert_end = std::chrono::steady_clock::now();
+        priority_insert_time_sec += std::chrono::duration<double>(priority_insert_end - priority_insert_start).count();
+    }
+
+    // 现在队首的PT善后工作已经结束，将其出队（删除）
+    auto priority_erase_start = std::chrono::steady_clock::now();
+    priority_head += 1;
+    if (priority_head >= priority.size())
+    {
+        priority.clear();
+        priority_head = 0;
+    }
+    else if (priority_head > 4096 && priority_head * 2 > priority.size())
+    {
+        priority.erase(priority.begin(), priority.begin() + priority_head);
+        priority_head = 0;
+    }
+    auto priority_erase_end = std::chrono::steady_clock::now();
+    priority_erase_time_sec += std::chrono::duration<double>(priority_erase_end - priority_erase_start).count();
+
+    auto popnext_end = std::chrono::steady_clock::now();
+    popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+#else
+    // 对优先队列最前面的PT，首先利用这个PT生成一系列猜测
+    auto generate_in_popnext_start = std::chrono::steady_clock::now();
+    Generate(priority.front());
+    auto generate_in_popnext_end = std::chrono::steady_clock::now();
+    generate_in_popnext_time_sec += std::chrono::duration<double>(generate_in_popnext_end - generate_in_popnext_start).count();
+
+    // 然后需要根据即将出队的PT，生成一系列新的PT
+    auto newpts_start = std::chrono::steady_clock::now();
+    vector<PT> new_pts = priority.front().NewPTs();
+    auto newpts_end = std::chrono::steady_clock::now();
+    newpts_time_sec += std::chrono::duration<double>(newpts_end - newpts_start).count();
+    new_pts_count += new_pts.size();
+    for (PT pt : new_pts)
+    {
+        // 计算概率
+        auto calprob_start = std::chrono::steady_clock::now();
+        CalProb(pt);
+        auto calprob_end = std::chrono::steady_clock::now();
+        calprob_time_sec += std::chrono::duration<double>(calprob_end - calprob_start).count();
+        // 接下来的这个循环，作用是根据概率，将新的PT插入到优先队列中
+        auto priority_insert_start = std::chrono::steady_clock::now();
         for (auto iter = priority.begin(); iter != priority.end(); iter++)
         {
             // 对于非队首和队尾的特殊情况
@@ -125,10 +558,19 @@ void PriorityQueue::PopNext()
                 break;
             }
         }
+        auto priority_insert_end = std::chrono::steady_clock::now();
+        priority_insert_time_sec += std::chrono::duration<double>(priority_insert_end - priority_insert_start).count();
     }
 
     // 现在队首的PT善后工作已经结束，将其出队（删除）
+    auto priority_erase_start = std::chrono::steady_clock::now();
     priority.erase(priority.begin());
+    auto priority_erase_end = std::chrono::steady_clock::now();
+    priority_erase_time_sec += std::chrono::duration<double>(priority_erase_end - priority_erase_start).count();
+
+    auto popnext_end = std::chrono::steady_clock::now();
+    popnext_time_sec += std::chrono::duration<double>(popnext_end - popnext_start).count();
+#endif
 }
 
 // 这个函数你就算看不懂，对并行算法的实现影响也不大
@@ -175,45 +617,456 @@ vector<PT> PT::NewPTs()
 
     return res;
 }
+size_t PriorityQueue::CountGeneratedGuesses(const PT& pt)
+{
+    if (pt.content.empty() || pt.max_indices.size() < pt.content.size())
+    {
+        return 0;
+    }
+    return static_cast<size_t>(pt.max_indices[pt.content.size() - 1]);
+}
+
+#if defined(ENABLE_RELAXED_BATCH_POPNEXT) && defined(ENABLE_RELAXED_BATCH_PREFIX_CACHE)
+static segment* GetSegmentValuesForPrefixCache(model& m, const segment& seg)
+{
+    if (seg.type == 1)
+    {
+        return &m.letters[m.FindLetter(seg)];
+    }
+    if (seg.type == 2)
+    {
+        return &m.digits[m.FindDigit(seg)];
+    }
+    if (seg.type == 3)
+    {
+        return &m.symbols[m.FindSymbol(seg)];
+    }
+    return nullptr;
+}
+
+static PTGenerateView BuildPTGenerateView(model& m, const PT& pt)
+{
+    PTGenerateView view;
+    view.values = nullptr;
+    view.count = 0;
+
+    if (pt.content.empty() || pt.max_indices.size() < pt.content.size())
+    {
+        return view;
+    }
+
+    if (pt.content.size() > 1)
+    {
+        int seg_idx = 0;
+        for (int idx : pt.curr_indices)
+        {
+            segment* fixed_values = GetSegmentValuesForPrefixCache(m, pt.content[seg_idx]);
+            if (fixed_values != nullptr)
+            {
+                view.prefix += fixed_values->ordered_values[idx];
+            }
+            seg_idx += 1;
+            if (seg_idx == pt.content.size() - 1)
+            {
+                break;
+            }
+        }
+    }
+
+    segment* last_values = GetSegmentValuesForPrefixCache(m, pt.content[pt.content.size() - 1]);
+    if (last_values != nullptr)
+    {
+        view.values = &last_values->ordered_values;
+        view.count = static_cast<size_t>(pt.max_indices[pt.content.size() - 1]);
+    }
+    return view;
+}
+
+static void GenerateToRangeChunkCached(const PTGenerateView& view, vector<string>& dst, size_t output_base, size_t begin, size_t end)
+{
+    if (view.values == nullptr || begin >= end || end > view.count)
+    {
+        return;
+    }
+
+    const vector<string>& values = *view.values;
+    for (size_t idx = begin; idx < end; ++idx)
+    {
+        if (view.prefix.empty())
+        {
+            dst[output_base + idx - begin] = values[idx];
+        }
+        else
+        {
+            dst[output_base + idx - begin] = view.prefix + values[idx];
+        }
+    }
+}
+
+#endif
+
+void PriorityQueue::GenerateToRangeChunk(const PT& pt, vector<string>& dst, size_t output_base, size_t begin, size_t end)
+{
+    auto getSegmentPtr = [this](const segment& seg) -> segment*
+    {
+        if (seg.type == 1)
+        {
+            return &m.letters[m.FindLetter(seg)];
+        }
+        if (seg.type == 2)
+        {
+            return &m.digits[m.FindDigit(seg)];
+        }
+        if (seg.type == 3)
+        {
+            return &m.symbols[m.FindSymbol(seg)];
+        }
+        return nullptr;
+    };
+
+    auto writeSegmentValues = [&dst, output_base, begin, end](const string& prefix, segment* a)
+    {
+        for (size_t i = begin; i < end; ++i)
+        {
+            if (prefix.empty())
+            {
+                dst[output_base + i - begin] = a->ordered_values[i];
+            }
+            else
+            {
+                dst[output_base + i - begin] = prefix + a->ordered_values[i];
+            }
+        }
+    };
+
+    size_t total_count = CountGeneratedGuesses(pt);
+    if (pt.content.empty() || begin >= end || end > total_count)
+    {
+        return;
+    }
+
+    if (pt.content.size() == 1)
+    {
+        segment* a = getSegmentPtr(pt.content[0]);
+        writeSegmentValues("", a);
+    }
+    else
+    {
+        string guess;
+        int seg_idx = 0;
+        for (int idx : pt.curr_indices)
+        {
+            if (pt.content[seg_idx].type == 1)
+            {
+                guess += m.letters[m.FindLetter(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 2)
+            {
+                guess += m.digits[m.FindDigit(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 3)
+            {
+                guess += m.symbols[m.FindSymbol(pt.content[seg_idx])].ordered_values[idx];
+            }
+            seg_idx += 1;
+            if (seg_idx == pt.content.size() - 1)
+            {
+                break;
+            }
+        }
+
+        segment* a = getSegmentPtr(pt.content[pt.content.size() - 1]);
+        writeSegmentValues(guess, a);
+    }
+}
+
+void PriorityQueue::GenerateToRange(const PT& pt, vector<string>& dst, size_t base)
+{
+    GenerateToRangeChunk(pt, dst, base, 0, CountGeneratedGuesses(pt));
+}
+
+void PriorityQueue::GenerateToVector(PT pt, vector<string>& out)
+{
+    CalProb(pt);
+
+    auto getSegmentPtr = [this](const segment& seg) -> segment*
+    {
+        if (seg.type == 1)
+        {
+            return &m.letters[m.FindLetter(seg)];
+        }
+        if (seg.type == 2)
+        {
+            return &m.digits[m.FindDigit(seg)];
+        }
+        if (seg.type == 3)
+        {
+            return &m.symbols[m.FindSymbol(seg)];
+        }
+        return nullptr;
+    };
+
+    auto appendSegmentValues = [&out](const string& prefix, segment* a, int n)
+    {
+        size_t base = out.size();
+        out.resize(base + n);
+        for (int i = 0; i < n; ++i)
+        {
+            if (prefix.empty())
+            {
+                out[base + i] = a->ordered_values[i];
+            }
+            else
+            {
+                out[base + i] = prefix + a->ordered_values[i];
+            }
+        }
+    };
+
+    if (pt.content.size() == 1)
+    {
+        segment* a = getSegmentPtr(pt.content[0]);
+        appendSegmentValues("", a, pt.max_indices[0]);
+    }
+    else
+    {
+        string guess;
+        int seg_idx = 0;
+        for (int idx : pt.curr_indices)
+        {
+            if (pt.content[seg_idx].type == 1)
+            {
+                guess += m.letters[m.FindLetter(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 2)
+            {
+                guess += m.digits[m.FindDigit(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 3)
+            {
+                guess += m.symbols[m.FindSymbol(pt.content[seg_idx])].ordered_values[idx];
+            }
+            seg_idx += 1;
+            if (seg_idx == pt.content.size() - 1)
+            {
+                break;
+            }
+        }
+
+        segment* a = getSegmentPtr(pt.content[pt.content.size() - 1]);
+        appendSegmentValues(guess, a, pt.max_indices[pt.content.size() - 1]);
+    }
+}
 
 
 // 这个函数是PCFG并行化算法的主要载体
 // 尽量看懂，然后进行并行实现
 void PriorityQueue::Generate(PT pt)
 {
+    generate_calls += 1;
+    auto generate_start = std::chrono::high_resolution_clock::now();
+
     // 计算PT的概率，这里主要是给PT的概率进行初始化
     CalProb(pt);
+
+    auto getSegmentPtr = [this](const segment& seg) -> segment*
+    {
+        if (seg.type == 1)
+        {
+            return &m.letters[m.FindLetter(seg)];
+        }
+        if (seg.type == 2)
+        {
+            return &m.digits[m.FindDigit(seg)];
+        }
+        if (seg.type == 3)
+        {
+            return &m.symbols[m.FindSymbol(seg)];
+        }
+        return nullptr;
+    };
+
+    const int PARALLEL_THRESHOLD = GENERATE_PARALLEL_THRESHOLD;
+
+    auto appendSegmentValues = [this, PARALLEL_THRESHOLD](const string& prefix, segment* a, int n)
+    {
+        append_calls += 1;
+        append_total_items += n;
+        auto append_start = std::chrono::high_resolution_clock::now();
+
+#if defined(ENABLE_LAZY_GUESS_BLOCK)
+        {
+        // block-level lazy: one GuessBlock per PT/segment, not per candidate
+        bool has_prefix = !prefix.empty();
+        size_t prefix_id = 0;
+        if (has_prefix)
+        {
+            prefix_id = guesses.add_prefix(prefix);
+        }
+        guesses.add_block(prefix_id, &a->ordered_values, 0, static_cast<size_t>(n), has_prefix);
+        append_serial_calls += 1;
+        total_guesses += n;
+        auto append_end = std::chrono::high_resolution_clock::now();
+        append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+#ifdef DEBUG_LAZY_GUESS_BLOCK_EQUIV
+        // verify block materialization matches full string construction
+        size_t check_start = guesses.total_count - static_cast<size_t>(n);
+        for (int i = 0; i < n; ++i)
+        {
+            string ref = has_prefix ? prefix + a->ordered_values[i] : a->ordered_values[i];
+            string got = guesses.materialize(check_start + i);
+            if (ref != got)
+            {
+                cerr << "[DEBUG_LAZY_GUESS_BLOCK_EQUIV] value mismatch idx=" << i
+                     << " ref=" << ref << " got=" << got << endl;
+                break;
+            }
+        }
+#endif
+        return;
+        }
+#elif defined(ENABLE_LAZY_GUESS_REF)
+        {
+        // per-candidate lazy ref
+        bool has_prefix = !prefix.empty();
+        size_t prefix_id = has_prefix ? guesses.add_prefix(prefix) : 0;
+        size_t base = guesses.refs.size();
+        guesses.refs.resize(base + n);
+#if defined(ENABLE_OPENMP_GENERATE) && defined(_OPENMP)
+        if (n >= PARALLEL_THRESHOLD)
+        {
+            append_parallel_calls += 1;
+            append_parallel_items += n;
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < n; ++i)
+            {
+                guesses.refs[base + i] = {prefix_id, &a->ordered_values, i, has_prefix};
+            }
+            total_guesses += n;
+            auto append_end = std::chrono::high_resolution_clock::now();
+            append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+#ifdef DEBUG_LAZY_GUESS_EQUIV
+            for (int i = 0; i < n; ++i)
+            {
+                string ref = has_prefix ? prefix + a->ordered_values[i] : a->ordered_values[i];
+                string got = guesses.materialize(base + i);
+                if (ref != got)
+                {
+                    cerr << "[DEBUG_LAZY_GUESS_EQUIV] value mismatch idx=" << i << endl;
+                    break;
+                }
+            }
+#endif
+            return;
+        }
+#endif
+        append_serial_calls += 1;
+        for (int i = 0; i < n; i += 1)
+        {
+            guesses.refs[base + i] = {prefix_id, &a->ordered_values, i, has_prefix};
+        }
+        total_guesses += n;
+        auto append_end = std::chrono::high_resolution_clock::now();
+        append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+#ifdef DEBUG_LAZY_GUESS_EQUIV
+        for (int i = 0; i < n; ++i)
+        {
+            string ref = has_prefix ? prefix + a->ordered_values[i] : a->ordered_values[i];
+            string got = guesses.materialize(base + i);
+            if (ref != got)
+            {
+                cerr << "[DEBUG_LAZY_GUESS_EQUIV] value mismatch idx=" << i << endl;
+                break;
+            }
+        }
+#endif
+        return;
+        }
+#endif
+
+        size_t base = guesses.size();
+        guesses.resize(base + n);
+#if defined(ENABLE_PTHREAD_GENERATE)
+        if (n >= PARALLEL_THRESHOLD)
+        {
+            append_parallel_calls += 1;
+            append_parallel_items += n;
+
+            int thread_count = GetPthreadGenerateThreadCount();
+            vector<pthread_t> threads(thread_count);
+            vector<PthreadGenerateTask> tasks(thread_count);
+
+            for (int t = 0; t < thread_count; ++t)
+            {
+                int begin = t * n / thread_count;
+                int end = (t + 1) * n / thread_count;
+                tasks[t] = {&guesses, &prefix, a, base, begin, end};
+                pthread_create(&threads[t], nullptr, PthreadGenerateWorker, &tasks[t]);
+            }
+
+            for (int t = 0; t < thread_count; ++t)
+            {
+                pthread_join(threads[t], nullptr);
+            }
+
+            total_guesses += n;
+            auto append_end = std::chrono::high_resolution_clock::now();
+            append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+            return;
+        }
+#endif
+#if defined(ENABLE_OPENMP_GENERATE) && defined(_OPENMP)
+        if (n >= PARALLEL_THRESHOLD)
+        {
+            append_parallel_calls += 1;
+            append_parallel_items += n;
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < n; ++i)
+            {
+                if (prefix.empty())
+                {
+                    guesses[base + i] = a->ordered_values[i];
+                }
+                else
+                {
+                    guesses[base + i] = prefix + a->ordered_values[i];
+                }
+            }
+            total_guesses += n;
+            auto append_end = std::chrono::high_resolution_clock::now();
+            append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+            return;
+        }
+#endif
+        append_serial_calls += 1;
+        for (int i = 0; i < n; i += 1)
+        {
+            if (prefix.empty())
+            {
+                guesses[base + i] = a->ordered_values[i];
+            }
+            else
+            {
+                guesses[base + i] = prefix + a->ordered_values[i];
+            }
+        }
+        total_guesses += n;
+        auto append_end = std::chrono::high_resolution_clock::now();
+        append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+    };
 
     // 对于只有一个segment的PT，直接遍历生成其中的所有value即可
     if (pt.content.size() == 1)
     {
         // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
-        segment *a;
+        segment *a = getSegmentPtr(pt.content[0]);
         // 在模型中定位到这个segment
-        if (pt.content[0].type == 1)
-        {
-            a = &m.letters[m.FindLetter(pt.content[0])];
-        }
-        if (pt.content[0].type == 2)
-        {
-            a = &m.digits[m.FindDigit(pt.content[0])];
-        }
-        if (pt.content[0].type == 3)
-        {
-            a = &m.symbols[m.FindSymbol(pt.content[0])];
-        }
         
         // Multi-thread TODO：
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
-        for (int i = 0; i < pt.max_indices[0]; i += 1)
-        {
-            string guess = a->ordered_values[i];
-            // cout << guess << endl;
-            guesses.emplace_back(guess);
-            total_guesses += 1;
-        }
+        appendSegmentValues("", a, pt.max_indices[0]);
     }
     else
     {
@@ -244,30 +1097,46 @@ void PriorityQueue::Generate(PT pt)
         }
 
         // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
-        segment *a;
-        if (pt.content[pt.content.size() - 1].type == 1)
-        {
-            a = &m.letters[m.FindLetter(pt.content[pt.content.size() - 1])];
-        }
-        if (pt.content[pt.content.size() - 1].type == 2)
-        {
-            a = &m.digits[m.FindDigit(pt.content[pt.content.size() - 1])];
-        }
-        if (pt.content[pt.content.size() - 1].type == 3)
-        {
-            a = &m.symbols[m.FindSymbol(pt.content[pt.content.size() - 1])];
-        }
+        segment *a = getSegmentPtr(pt.content[pt.content.size() - 1]);
         
         // Multi-thread TODO：
         // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
         // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
         // 这个过程是可以高度并行化的
-        for (int i = 0; i < pt.max_indices[pt.content.size() - 1]; i += 1)
-        {
-            string temp = guess + a->ordered_values[i];
-            // cout << temp << endl;
-            guesses.emplace_back(temp);
-            total_guesses += 1;
-        }
+        appendSegmentValues(guess, a, pt.max_indices[pt.content.size() - 1]);
     }
+
+    auto generate_end = std::chrono::high_resolution_clock::now();
+    generate_time_sec += std::chrono::duration<double>(generate_end - generate_start).count();
+}
+
+void PriorityQueue::PrintGenerateStats() const
+{
+    cout << "[GenerateStats]" << endl;
+    cout << "generate_calls = " << generate_calls << endl;
+    cout << "append_calls = " << append_calls << endl;
+    cout << "append_serial_calls = " << append_serial_calls << endl;
+    cout << "append_parallel_calls = " << append_parallel_calls << endl;
+    cout << "append_total_items = " << append_total_items << endl;
+    cout << "append_parallel_items = " << append_parallel_items << endl;
+    cout << "generate_time_sec = " << generate_time_sec << endl;
+    cout << "append_time_sec = " << append_time_sec << endl;
+    cout << "[PopNextStats]" << endl;
+#ifdef ENABLE_RELAXED_BATCH_POPNEXT
+    cout << "priority_queue_mode = relaxed_batch_popnext" << endl;
+#elif defined(ENABLE_RELAXED_HEAP_PRIORITY)
+    cout << "priority_queue_mode = relaxed_heap" << endl;
+#elif defined(ENABLE_PRIORITY_LAZY_OPT)
+    cout << "priority_queue_mode = sorted_vector_lazy" << endl;
+#else
+    cout << "priority_queue_mode = sorted_vector" << endl;
+#endif
+    cout << "popnext_calls = " << popnext_calls << endl;
+    cout << "new_pts_count = " << new_pts_count << endl;
+    cout << "popnext_time_sec = " << popnext_time_sec << endl;
+    cout << "generate_in_popnext_time_sec = " << generate_in_popnext_time_sec << endl;
+    cout << "newpts_time_sec = " << newpts_time_sec << endl;
+    cout << "calprob_time_sec = " << calprob_time_sec << endl;
+    cout << "priority_insert_time_sec = " << priority_insert_time_sec << endl;
+    cout << "priority_erase_time_sec = " << priority_erase_time_sec << endl;
 }
