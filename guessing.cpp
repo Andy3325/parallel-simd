@@ -8,6 +8,12 @@
 #if defined(ENABLE_RELAXED_BATCH_POPNEXT) && (defined(ENABLE_PRIORITY_LAZY_OPT) || defined(ENABLE_RELAXED_HEAP_PRIORITY))
 #error "Do not enable ENABLE_RELAXED_BATCH_POPNEXT with ENABLE_PRIORITY_LAZY_OPT or ENABLE_RELAXED_HEAP_PRIORITY"
 #endif
+#if defined(ENABLE_LAZY_GUESS_REF) && defined(ENABLE_LAZY_GUESS_BLOCK)
+#error "ENABLE_LAZY_GUESS_REF and ENABLE_LAZY_GUESS_BLOCK are mutually exclusive"
+#endif
+#if defined(ENABLE_RELAXED_BATCH_POPNEXT) && defined(ENABLE_LAZY_GUESS_BLOCK)
+#error "ENABLE_LAZY_GUESS_BLOCK is currently supported only without ENABLE_RELAXED_BATCH_POPNEXT"
+#endif
 #if defined(ENABLE_RELAXED_BATCH_POPNEXT) && !defined(_OPENMP)
 #error "ENABLE_RELAXED_BATCH_POPNEXT requires OpenMP"
 #endif
@@ -888,8 +894,40 @@ void PriorityQueue::Generate(PT pt)
         append_total_items += n;
         auto append_start = std::chrono::high_resolution_clock::now();
 
-#ifdef ENABLE_LAZY_GUESS_REF
+#if defined(ENABLE_LAZY_GUESS_BLOCK)
         {
+        // block-level lazy: one GuessBlock per PT/segment, not per candidate
+        bool has_prefix = !prefix.empty();
+        size_t prefix_id = 0;
+        if (has_prefix)
+        {
+            prefix_id = guesses.add_prefix(prefix);
+        }
+        guesses.add_block(prefix_id, &a->ordered_values, 0, static_cast<size_t>(n), has_prefix);
+        append_serial_calls += 1;
+        total_guesses += n;
+        auto append_end = std::chrono::high_resolution_clock::now();
+        append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+#ifdef DEBUG_LAZY_GUESS_BLOCK_EQUIV
+        // verify block materialization matches full string construction
+        size_t check_start = guesses.total_count - static_cast<size_t>(n);
+        for (int i = 0; i < n; ++i)
+        {
+            string ref = has_prefix ? prefix + a->ordered_values[i] : a->ordered_values[i];
+            string got = guesses.materialize(check_start + i);
+            if (ref != got)
+            {
+                cerr << "[DEBUG_LAZY_GUESS_BLOCK_EQUIV] value mismatch idx=" << i
+                     << " ref=" << ref << " got=" << got << endl;
+                break;
+            }
+        }
+#endif
+        return;
+        }
+#elif defined(ENABLE_LAZY_GUESS_REF)
+        {
+        // per-candidate lazy ref
         bool has_prefix = !prefix.empty();
         size_t prefix_id = has_prefix ? guesses.add_prefix(prefix) : 0;
         size_t base = guesses.refs.size();

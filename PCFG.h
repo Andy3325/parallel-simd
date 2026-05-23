@@ -46,7 +46,6 @@ public:
 class PT
 {
 public:
-    // 例如，L6D1的content大小为2，content[0]为L6，content[1]为D1
     vector<segment> content;
 
     // pivot值，参见PCFG的原理
@@ -138,6 +137,146 @@ public:
 
 // 优先队列，用于按照概率降序生成口令猜测
 // 实际上，这个class负责队列维护、口令生成、结果存储的全部过程
+#if defined(ENABLE_LAZY_GUESS_REF) && defined(ENABLE_LAZY_GUESS_BLOCK)
+#error "ENABLE_LAZY_GUESS_REF and ENABLE_LAZY_GUESS_BLOCK are mutually exclusive"
+#endif
+
+#ifdef ENABLE_LAZY_GUESS_BLOCK
+struct GuessBlock
+{
+    size_t prefix_index;
+    const vector<string>* values;
+    size_t begin;
+    size_t count;
+    bool has_prefix;
+};
+
+class LazyGuessBlockBuffer
+{
+public:
+    vector<GuessBlock> blocks;
+    deque<string> prefix_storage;
+    size_t total_count = 0;
+
+    size_t size() const
+    {
+        return total_count;
+    }
+
+    bool empty() const
+    {
+        return total_count == 0;
+    }
+
+    void clear()
+    {
+        blocks.clear();
+        prefix_storage.clear();
+        total_count = 0;
+    }
+
+    void resize(size_t n)
+    {
+        (void)n;
+    }
+
+    size_t add_prefix(string prefix)
+    {
+        prefix_storage.push_back(std::move(prefix));
+        return prefix_storage.size() - 1;
+    }
+
+    void add_block(size_t prefix_index,
+                   const vector<string>* values,
+                   size_t begin,
+                   size_t count,
+                   bool has_prefix)
+    {
+        blocks.push_back({prefix_index, values, begin, count, has_prefix});
+        total_count += count;
+    }
+
+    string materialize_block_value(const GuessBlock& block,
+                                   size_t local_idx) const
+    {
+        const string& val = (*(block.values))[block.begin + local_idx];
+        if (!block.has_prefix)
+        {
+            return val;
+        }
+        const string& prefix = prefix_storage[block.prefix_index];
+        string out;
+        out.reserve(prefix.size() + val.size());
+        out.append(prefix);
+        out.append(val);
+        return out;
+    }
+
+    string materialize(size_t global_idx) const
+    {
+        size_t offset = 0;
+        for (const GuessBlock& block : blocks)
+        {
+            if (global_idx < offset + block.count)
+            {
+                return materialize_block_value(block, global_idx - offset);
+            }
+            offset += block.count;
+        }
+        return "";
+    }
+
+    string operator[](size_t global_idx) const
+    {
+        return materialize(global_idx);
+    }
+
+    struct iterator
+    {
+        const LazyGuessBlockBuffer* owner;
+        size_t block_idx;
+        size_t local_idx;
+
+        bool operator!=(const iterator& other) const
+        {
+            return block_idx != other.block_idx || local_idx != other.local_idx;
+        }
+
+        iterator& operator++()
+        {
+            local_idx += 1;
+            if (block_idx < owner->blocks.size() &&
+                local_idx >= owner->blocks[block_idx].count)
+            {
+                block_idx += 1;
+                local_idx = 0;
+            }
+            return *this;
+        }
+
+        string operator*() const
+        {
+            return owner->materialize_block_value(
+                owner->blocks[block_idx], local_idx);
+        }
+    };
+
+    iterator begin() const
+    {
+        if (blocks.empty())
+        {
+            return end();
+        }
+        return {this, 0, 0};
+    }
+
+    iterator end() const
+    {
+        return {this, blocks.size(), 0};
+    }
+};
+#endif
+
 #ifdef ENABLE_LAZY_GUESS_REF
 struct GuessRef
 {
@@ -280,10 +419,12 @@ public:
     // 将优先队列最前面的一个PT
     void PopNext();
     int total_guesses = 0;
-#ifndef ENABLE_LAZY_GUESS_REF
-    vector<string> guesses;
-#else
+#ifdef ENABLE_LAZY_GUESS_BLOCK
+    LazyGuessBlockBuffer guesses;
+#elif defined(ENABLE_LAZY_GUESS_REF)
     LazyGuessBuffer guesses;
+#else
+    vector<string> guesses;
 #endif
 
     long long generate_calls = 0;
