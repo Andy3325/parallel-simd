@@ -41,3 +41,15 @@ smoke_test
 Thumbs.db
 .idea/
 .vscode/
+
+# Final local/qsub artifacts
+build_check_serial
+build_check_openmp
+build_check_pthread
+build_check_simdhash
+build_check_lazy_block_generic_simd
+test
+test.sh.o*
+test.sh.e*
+results/qsub_final_*/
+archive_snapshots/

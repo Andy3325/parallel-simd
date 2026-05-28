@@ -22,45 +22,37 @@
 using namespace std;
 using namespace chrono;
 
-// 编译指令示例：
-// scalar:
-// g++ -O2 -std=c++17 correctness_guess.cpp train.cpp guessing.cpp md5.cpp -o correctness_scalar
-//
-// SIMD hash:
-// g++ -O2 -std=c++17 -DENABLE_SIMD_HASH_BATCH correctness_guess.cpp train.cpp guessing.cpp md5.cpp -o correctness_simd
-//
-// Lazy Block + SIMD hash:
-// g++ -O2 -std=c++17 -DENABLE_OPENMP_GENERATE -DENABLE_RELAXED_HEAP_PRIORITY -DENABLE_LAZY_GUESS_BLOCK -DENABLE_SIMD_HASH_BATCH -fopenmp correctness_guess.cpp train.cpp guessing.cpp md5.cpp -o correctness_lazy_block_simd
-
 #ifdef ENABLE_SIMD_HASH_BATCH
 template <typename GuessRange>
 static void HashBatchSIMDAndCount(
-    const GuessRange &guesses,
-    const unordered_set<string> &test_set,
-    int &cracked
-) {
+    const GuessRange& guesses,
+    const unordered_set<string>& test_set,
+    int& cracked)
+{
     string inputs[4];
     bit32 states4[4][4];
     bit32 state_tail[4];
     int lane = 0;
 
-    for (string pw : guesses) {
-        // Cracked 统计逻辑保持不变：仍然对每一个候选口令查 test_set。
-        if (test_set.find(pw) != test_set.end()) {
+    for (string pw : guesses)
+    {
+        if (test_set.find(pw) != test_set.end())
+        {
             cracked += 1;
         }
 
         inputs[lane] = std::move(pw);
         lane += 1;
 
-        if (lane == 4) {
+        if (lane == 4)
+        {
             MD5Hash4(inputs, states4);
             lane = 0;
         }
     }
 
-    // 处理不足 4 个的尾部候选，不能跳过 MD5。
-    for (int i = 0; i < lane; i++) {
+    for (int i = 0; i < lane; i++)
+    {
         MD5Hash(inputs[i], state_tail);
     }
 }
@@ -156,21 +148,7 @@ static void HashLazyBlockParallelSIMDAndCount(
 
             if (lane == 4)
             {
-#ifdef ENABLE_SIMD_HASH_1BLOCK_FASTPATH
-                if (inputs[0].size() <= 55 &&
-                    inputs[1].size() <= 55 &&
-                    inputs[2].size() <= 55 &&
-                    inputs[3].size() <= 55)
-                {
-                    MD5Hash4_1Block(inputs, states4);
-                }
-                else
-                {
-                    MD5Hash4(inputs, states4);
-                }
-#else
                 MD5Hash4(inputs, states4);
-#endif
                 lane = 0;
             }
         }
@@ -190,10 +168,9 @@ static void HashLazyBlockParallelSIMDAndCount(
 
 int main()
 {
-    double time_hash = 0;   // 用于 MD5 哈希的时间
-    double time_guess = 0;  // 哈希和猜测的总时长
-    double time_train = 0;  // 模型训练的总时长
-
+    double time_hash = 0;
+    double time_guess = 0;
+    double time_train = 0;
     PriorityQueue q;
 
     auto start_train = system_clock::now();
@@ -203,7 +180,7 @@ int main()
     auto duration_train = duration_cast<microseconds>(end_train - start_train);
     time_train = double(duration_train.count()) * microseconds::period::num / microseconds::period::den;
 
-    // 加载测试数据：训练集前 1,000,000 个口令作为 cracked 判断集合
+    // 鍔犺浇娴嬭瘯鏁版嵁锛氳缁冮泦鍓?1,000,000 涓彛浠や綔涓?cracked 鍒ゆ柇闆嗗悎
     unordered_set<string> test_set;
     test_set.reserve(2000000);
     test_set.max_load_factor(0.5);
@@ -229,7 +206,7 @@ int main()
     int curr_num = 0;
     auto start = system_clock::now();
 
-    // 由于需要定期清空内存，这里记录已经生成并处理过的口令总数
+    // 鐢变簬闇€瑕佸畾鏈熸竻绌哄唴瀛橈紝杩欓噷璁板綍宸茬粡鐢熸垚骞跺鐞嗚繃鐨勫彛浠ゆ€绘暟
     int history = 0;
 
     while (!q.priority.empty())
@@ -242,7 +219,7 @@ int main()
             cout << "Guesses generated: " << history + q.total_guesses << endl;
             curr_num = q.total_guesses;
 
-            // 实验生成的猜测上限
+            // Generate exactly the official upper-bound candidate count.
             int generate_n = 10000000;
             if (history + q.total_guesses > generate_n)
             {
@@ -258,8 +235,7 @@ int main()
             }
         }
 
-        // 为了避免内存超限，当 q.guesses 中口令达到一定数目时，对其中口令进行 Hash，
-        // 然后清空 q.guesses。history 用于记录已经处理过的口令数。
+        // Hash and clear buffered guesses once the official memory threshold is reached.
         if (curr_num > 1000000)
         {
             auto start_hash = system_clock::now();

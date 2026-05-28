@@ -137,10 +137,6 @@ public:
 
 // 优先队列，用于按照概率降序生成口令猜测
 // 实际上，这个class负责队列维护、口令生成、结果存储的全部过程
-#if defined(ENABLE_LAZY_GUESS_REF) && defined(ENABLE_LAZY_GUESS_BLOCK)
-#error "ENABLE_LAZY_GUESS_REF and ENABLE_LAZY_GUESS_BLOCK are mutually exclusive"
-#endif
-
 #ifdef ENABLE_LAZY_GUESS_BLOCK
 struct GuessBlock
 {
@@ -277,120 +273,6 @@ public:
 };
 #endif
 
-#ifdef ENABLE_LAZY_GUESS_REF
-struct GuessRef
-{
-    size_t prefix_index;
-    const vector<string>* values;
-    int value_idx;
-    bool has_prefix;
-};
-
-class LazyGuessBuffer
-{
-public:
-    vector<GuessRef> refs;
-    deque<string> prefix_storage;
-
-    size_t size() const
-    {
-        return refs.size();
-    }
-
-    bool empty() const
-    {
-        return refs.empty();
-    }
-
-    void clear()
-    {
-        refs.clear();
-        prefix_storage.clear();
-    }
-
-    void resize(size_t n)
-    {
-        (void)n;
-    }
-
-    struct SlotProxy
-    {
-        const LazyGuessBuffer* owner;
-        size_t idx;
-
-        SlotProxy& operator=(const string& value)
-        {
-            (void)value;
-            return *this;
-        }
-
-        operator string() const
-        {
-            return owner->materialize(idx);
-        }
-    };
-
-    SlotProxy operator[](size_t idx) const
-    {
-        return {this, idx};
-    }
-
-    size_t add_prefix(string prefix)
-    {
-        prefix_storage.push_back(prefix);
-        return prefix_storage.size() - 1;
-    }
-
-    void add_ref(size_t prefix_index, const vector<string>* values, int value_idx, bool has_prefix)
-    {
-        refs.push_back({prefix_index, values, value_idx, has_prefix});
-    }
-
-    string materialize(size_t idx) const
-    {
-        const GuessRef& ref = refs[idx];
-        const string& value = (*ref.values)[ref.value_idx];
-        if (!ref.has_prefix)
-        {
-            return value;
-        }
-        return prefix_storage[ref.prefix_index] + value;
-    }
-
-    struct iterator
-    {
-        const LazyGuessBuffer* owner;
-        size_t idx;
-
-        bool operator!=(const iterator& other) const
-        {
-            return idx != other.idx;
-        }
-
-        iterator& operator++()
-        {
-            idx += 1;
-            return *this;
-        }
-
-        string operator*() const
-        {
-            return owner->materialize(idx);
-        }
-    };
-
-    iterator begin() const
-    {
-        return {this, 0};
-    }
-
-    iterator end() const
-    {
-        return {this, refs.size()};
-    }
-};
-#endif
-
 class PriorityQueue
 {
 public:
@@ -421,8 +303,6 @@ public:
     int total_guesses = 0;
 #ifdef ENABLE_LAZY_GUESS_BLOCK
     LazyGuessBlockBuffer guesses;
-#elif defined(ENABLE_LAZY_GUESS_REF)
-    LazyGuessBuffer guesses;
 #else
     vector<string> guesses;
 #endif
