@@ -6,9 +6,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -236,18 +236,82 @@ static void RunMaster(const model& trained_model,
     vector<double> hash_time_by_rank(size, 0.0);
     vector<double> generate_time_by_rank(size, 0.0);
 
+    vector<int> request_tokens(worker_count, 0);
+    vector<WorkerResult> result_buffers(worker_count);
+    vector<MPI_Request> event_requests(worker_count * 2, MPI_REQUEST_NULL);
+    vector<bool> stopped(worker_count, false);
+    vector<bool> task_in_flight(worker_count, false);
+
+    auto request_index = [](int worker_idx) { return worker_idx; };
+    auto result_index = [worker_count](int worker_idx)
+    {
+        return worker_count + worker_idx;
+    };
+    auto worker_rank = [](int worker_idx) { return worker_idx + 1; };
+
+    auto post_request_recv = [&](int worker_idx)
+    {
+        MPI_Irecv(&request_tokens[worker_idx], 1, MPI_INT, worker_rank(worker_idx),
+                  REQUEST_TAG, MPI_COMM_WORLD,
+                  &event_requests[request_index(worker_idx)]);
+    };
+
+    auto post_result_recv = [&](int worker_idx)
+    {
+        MPI_Irecv(&result_buffers[worker_idx],
+                  static_cast<int>(sizeof(WorkerResult)), MPI_BYTE,
+                  worker_rank(worker_idx), RESULT_TAG, MPI_COMM_WORLD,
+                  &event_requests[result_index(worker_idx)]);
+    };
+
+    auto aggregate_result = [&](int worker_idx)
+    {
+        const WorkerResult& result = result_buffers[worker_idx];
+        const int rank = worker_rank(worker_idx);
+        total_guesses += result.guesses;
+        total_cracked += result.cracked;
+        worker_time_by_rank[rank] += result.worker_time;
+        hash_time_by_rank[rank] += result.hash_time;
+        generate_time_by_rank[rank] += result.generate_time;
+        task_in_flight[worker_idx] = false;
+    };
+
+    for (int worker_idx = 0; worker_idx < worker_count; ++worker_idx)
+    {
+        post_request_recv(worker_idx);
+        post_result_recv(worker_idx);
+    }
+
     while (stopped_workers < worker_count)
     {
+        int completed_index = MPI_UNDEFINED;
+        int flag = 0;
         MPI_Status status;
-        MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+        MPI_Testany(static_cast<int>(event_requests.size()),
+                    event_requests.data(), &completed_index, &flag, &status);
 
-        const int source = status.MPI_SOURCE;
-        const int tag = status.MPI_TAG;
-
-        if (tag == REQUEST_TAG)
+        if (!flag || completed_index == MPI_UNDEFINED)
         {
-            MPI_Recv(nullptr, 0, MPI_BYTE, source, REQUEST_TAG,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            continue;
+        }
+
+        const bool is_request = completed_index < worker_count;
+        const int worker_idx = is_request
+            ? completed_index
+            : completed_index - worker_count;
+
+        if (is_request)
+        {
+            if (task_in_flight[worker_idx])
+            {
+                MPI_Wait(&event_requests[result_index(worker_idx)],
+                         MPI_STATUS_IGNORE);
+                aggregate_result(worker_idx);
+                if (!stopped[worker_idx])
+                {
+                    post_result_recv(worker_idx);
+                }
+            }
 
             if (next_pt_start < static_cast<unsigned long long>(task_list.size()))
             {
@@ -257,27 +321,40 @@ static void RunMaster(const model& trained_model,
                               next_pt_start + pt_block_size);
                 next_pt_start = task[1];
 
-                MPI_Send(task, 2, MPI_UNSIGNED_LONG_LONG, source, TASK_TAG,
-                         MPI_COMM_WORLD);
+                MPI_Request send_request = MPI_REQUEST_NULL;
+                MPI_Isend(task, 2, MPI_UNSIGNED_LONG_LONG,
+                          worker_rank(worker_idx), TASK_TAG, MPI_COMM_WORLD,
+                          &send_request);
+                MPI_Wait(&send_request, MPI_STATUS_IGNORE);
+
+                task_in_flight[worker_idx] = true;
+                post_request_recv(worker_idx);
             }
             else
             {
-                MPI_Send(nullptr, 0, MPI_BYTE, source, STOP_TAG,
-                         MPI_COMM_WORLD);
+                MPI_Request send_request = MPI_REQUEST_NULL;
+                MPI_Isend(nullptr, 0, MPI_BYTE, worker_rank(worker_idx),
+                          STOP_TAG, MPI_COMM_WORLD, &send_request);
+                MPI_Wait(&send_request, MPI_STATUS_IGNORE);
+
+                stopped[worker_idx] = true;
                 stopped_workers += 1;
+
+                if (event_requests[result_index(worker_idx)] != MPI_REQUEST_NULL)
+                {
+                    MPI_Cancel(&event_requests[result_index(worker_idx)]);
+                    MPI_Wait(&event_requests[result_index(worker_idx)],
+                             MPI_STATUS_IGNORE);
+                }
             }
         }
-        else if (tag == RESULT_TAG)
+        else
         {
-            WorkerResult result;
-            MPI_Recv(&result, static_cast<int>(sizeof(result)), MPI_BYTE,
-                     source, RESULT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-            total_guesses += result.guesses;
-            total_cracked += result.cracked;
-            worker_time_by_rank[source] += result.worker_time;
-            hash_time_by_rank[source] += result.hash_time;
-            generate_time_by_rank[source] += result.generate_time;
+            aggregate_result(worker_idx);
+            if (!stopped[worker_idx])
+            {
+                post_result_recv(worker_idx);
+            }
         }
     }
 
@@ -290,7 +367,7 @@ static void RunMaster(const model& trained_model,
     const double total_wall_time = SecondsSince(wall_start, steady_clock::now());
 
     cout << fixed << setprecision(6);
-    cout << "MPI mode: master_worker_blocking" << endl;
+    cout << "MPI mode: master_worker_nonblocking" << endl;
     cout << "MPI size: " << size << endl;
     cout << "Block size: " << pt_block_size << endl;
     cout << "Total guesses: " << total_guesses << endl;
@@ -317,7 +394,11 @@ static void RunWorker()
 
     while (true)
     {
-        MPI_Send(nullptr, 0, MPI_BYTE, 0, REQUEST_TAG, MPI_COMM_WORLD);
+        int request_token = 1;
+        MPI_Request request_send = MPI_REQUEST_NULL;
+        MPI_Isend(&request_token, 1, MPI_INT, 0, REQUEST_TAG, MPI_COMM_WORLD,
+                  &request_send);
+        MPI_Wait(&request_send, MPI_STATUS_IGNORE);
 
         MPI_Status status;
         MPI_Probe(0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
@@ -338,8 +419,10 @@ static void RunWorker()
             ProcessPTBlock(trained_model, test_set, task_list, task[0], task[1]);
         cout.rdbuf(original_cout);
 
-        MPI_Send(&result, static_cast<int>(sizeof(result)), MPI_BYTE, 0,
-                 RESULT_TAG, MPI_COMM_WORLD);
+        MPI_Request result_send = MPI_REQUEST_NULL;
+        MPI_Isend(&result, static_cast<int>(sizeof(result)), MPI_BYTE, 0,
+                  RESULT_TAG, MPI_COMM_WORLD, &result_send);
+        MPI_Wait(&result_send, MPI_STATUS_IGNORE);
     }
 }
 
@@ -358,7 +441,7 @@ int main(int argc, char** argv)
     {
         if (rank == 0)
         {
-            cerr << "mpi_master_worker requires at least 2 MPI processes"
+            cerr << "mpi_master_worker_nonblocking requires at least 2 MPI processes"
                  << endl;
         }
         MPI_Finalize();
