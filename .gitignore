@@ -1,17 +1,18 @@
+# build binaries
+main
+main.exe
+main_mpi_fast
+main_candidate
+main_*
+*.exe
+*.out
 *.o
 *.obj
-*.out
-*.exe
 *.a
 *.lib
 *.so
 *.dll
 *.dylib
-*.log
-*.zip
-*.tar
-*.gz
-*.7z
 
 build/
 Build/
@@ -30,9 +31,34 @@ Debug/
 Release/
 .cache/
 
+# qsub / PBS / MPI logs
+*.e
+*.log
+mpi_*.o
+mpi_*.e
+mpi_final*
+zip_exact*
+fast_mpi*
+
+# archives and reference packages
+*.zip
+*.tar
+*.gz
+*.7z
+lab4.zip
+main.pdf
+build_report.pdf
+
+# LaTeX generated files
+*.aux
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.bbl
+*.blg
+
 # Common local artifacts
-main
-main_*
 correctness
 smoke_test
 
@@ -52,4 +78,7 @@ test
 test.sh.o*
 test.sh.e*
 results/qsub_final_*/
+archive_logs*/
+archive_bins*/
 archive_snapshots/
+backups/
