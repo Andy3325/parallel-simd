@@ -323,4 +323,16 @@ public:
     double calprob_time_sec = 0.0;
     double priority_insert_time_sec = 0.0;
     double priority_erase_time_sec = 0.0;
+    long long hip_generate_calls = 0;
+    long long hip_generate_items = 0;
+    double hip_generate_total_time_sec = 0.0;
+    double hip_h2d_time_sec = 0.0;
+    double hip_kernel_time_sec = 0.0;
+    double hip_d2h_time_sec = 0.0;
+    long long cuda_generate_calls = 0;
+    long long cuda_generate_items = 0;
+    double cuda_generate_total_time_sec = 0.0;
+    double cuda_h2d_time_sec = 0.0;
+    double cuda_kernel_time_sec = 0.0;
+    double cuda_d2h_time_sec = 0.0;
 };

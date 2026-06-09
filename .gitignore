@@ -10,9 +10,11 @@ main_*
 *.obj
 *.a
 *.lib
+*.exp
 *.so
 *.dll
 *.dylib
+tmpxft_*
 
 build/
 Build/
@@ -27,6 +29,7 @@ files/
 guessdata/
 output/
 __pycache__/
+**pycache**/
 Debug/
 Release/
 .cache/
@@ -67,6 +70,7 @@ smoke_test
 Thumbs.db
 .idea/
 .vscode/
+.vs/
 
 # Final local/qsub artifacts
 build_check_serial

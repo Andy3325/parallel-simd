@@ -9,6 +9,12 @@
 #include <pthread.h>
 #include <cstdlib>
 #endif
+#ifdef ENABLE_HIP_GENERATE
+#include "gpu_generate.h"
+#endif
+#ifdef ENABLE_CUDA_GENERATE
+#include "gpu_generate_cuda.h"
+#endif
 #ifndef GENERATE_PARALLEL_THRESHOLD
 #define GENERATE_PARALLEL_THRESHOLD 4096
 #endif
@@ -538,6 +544,72 @@ void PriorityQueue::Generate(PT pt)
 
         size_t base = guesses.size();
         guesses.resize(base + n);
+#if defined(ENABLE_HIP_GENERATE) && !defined(ENABLE_LAZY_GUESS_BLOCK)
+        if (n >= HIP_GENERATE_THRESHOLD)
+        {
+            double hip_h2d = 0.0;
+            double hip_kernel = 0.0;
+            double hip_d2h = 0.0;
+            auto hip_start = std::chrono::high_resolution_clock::now();
+            bool hip_ok = HipGenerateSegmentValues(
+                prefix,
+                a->ordered_values,
+                n,
+                guesses,
+                base,
+                &hip_h2d,
+                &hip_kernel,
+                &hip_d2h);
+            auto hip_end = std::chrono::high_resolution_clock::now();
+
+            if (hip_ok)
+            {
+                hip_generate_calls += 1;
+                hip_generate_items += n;
+                hip_generate_total_time_sec += std::chrono::duration<double>(hip_end - hip_start).count();
+                hip_h2d_time_sec += hip_h2d;
+                hip_kernel_time_sec += hip_kernel;
+                hip_d2h_time_sec += hip_d2h;
+                total_guesses += n;
+                auto append_end = std::chrono::high_resolution_clock::now();
+                append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+                return;
+            }
+        }
+#endif
+#if defined(ENABLE_CUDA_GENERATE) && !defined(ENABLE_LAZY_GUESS_BLOCK)
+        if (n >= CUDA_GENERATE_THRESHOLD)
+        {
+            double cuda_h2d = 0.0;
+            double cuda_kernel = 0.0;
+            double cuda_d2h = 0.0;
+            auto cuda_start = std::chrono::high_resolution_clock::now();
+            bool cuda_ok = CudaGenerateSegmentValues(
+                prefix,
+                a->ordered_values,
+                n,
+                guesses,
+                base,
+                &cuda_h2d,
+                &cuda_kernel,
+                &cuda_d2h);
+            auto cuda_end = std::chrono::high_resolution_clock::now();
+
+            if (cuda_ok)
+            {
+                cuda_generate_calls += 1;
+                cuda_generate_items += n;
+                cuda_generate_total_time_sec += std::chrono::duration<double>(cuda_end - cuda_start).count();
+                cuda_h2d_time_sec += cuda_h2d;
+                cuda_kernel_time_sec += cuda_kernel;
+                cuda_d2h_time_sec += cuda_d2h;
+                total_guesses += n;
+                auto append_end = std::chrono::high_resolution_clock::now();
+                append_time_sec += std::chrono::duration<double>(append_end - append_start).count();
+                return;
+            }
+        }
+#endif
 #if defined(ENABLE_PTHREAD_GENERATE)
         if (n >= PARALLEL_THRESHOLD)
         {
@@ -673,6 +745,20 @@ void PriorityQueue::PrintGenerateStats() const
     cout << "append_parallel_items = " << append_parallel_items << endl;
     cout << "generate_time_sec = " << generate_time_sec << endl;
     cout << "append_time_sec = " << append_time_sec << endl;
+    cout << "[HIPGenerateStats]" << endl;
+    cout << "hip_generate_calls = " << hip_generate_calls << endl;
+    cout << "hip_generate_items = " << hip_generate_items << endl;
+    cout << "hip_generate_total_time_sec = " << hip_generate_total_time_sec << endl;
+    cout << "hip_h2d_time_sec = " << hip_h2d_time_sec << endl;
+    cout << "hip_kernel_time_sec = " << hip_kernel_time_sec << endl;
+    cout << "hip_d2h_time_sec = " << hip_d2h_time_sec << endl;
+    cout << "[CUDAGenerateStats]" << endl;
+    cout << "cuda_generate_calls=" << cuda_generate_calls << endl;
+    cout << "cuda_generate_items=" << cuda_generate_items << endl;
+    cout << "cuda_generate_total_time_sec=" << cuda_generate_total_time_sec << endl;
+    cout << "cuda_h2d_time_sec=" << cuda_h2d_time_sec << endl;
+    cout << "cuda_kernel_time_sec=" << cuda_kernel_time_sec << endl;
+    cout << "cuda_d2h_time_sec=" << cuda_d2h_time_sec << endl;
     cout << "[PopNextStats]" << endl;
 #ifdef ENABLE_RELAXED_HEAP_PRIORITY
     cout << "priority_queue_mode = relaxed_heap" << endl;
