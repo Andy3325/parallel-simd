@@ -11,6 +11,8 @@ main_*
 *.a
 *.lib
 *.exp
+*.pdb
+*.ilk
 *.so
 *.dll
 *.dylib

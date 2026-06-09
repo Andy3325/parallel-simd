@@ -583,7 +583,25 @@ void PriorityQueue::Generate(PT pt)
             double cuda_h2d = 0.0;
             double cuda_kernel = 0.0;
             double cuda_d2h = 0.0;
+#ifdef ENABLE_CUDA_GENERATE_REUSE
+            static CudaGenerateContext cuda_reuse_ctx;
+            static bool cuda_reuse_ctx_ready = InitCudaGenerateContext(&cuda_reuse_ctx);
+            long long alloc_before = cuda_reuse_ctx.alloc_calls;
+            long long realloc_before = cuda_reuse_ctx.realloc_calls;
+#endif
             auto cuda_start = std::chrono::high_resolution_clock::now();
+#ifdef ENABLE_CUDA_GENERATE_REUSE
+            bool cuda_ok = cuda_reuse_ctx_ready && CudaGenerateSegmentValuesWithContext(
+                &cuda_reuse_ctx,
+                prefix,
+                a->ordered_values,
+                n,
+                guesses,
+                base,
+                &cuda_h2d,
+                &cuda_kernel,
+                &cuda_d2h);
+#else
             bool cuda_ok = CudaGenerateSegmentValues(
                 prefix,
                 a->ordered_values,
@@ -593,10 +611,21 @@ void PriorityQueue::Generate(PT pt)
                 &cuda_h2d,
                 &cuda_kernel,
                 &cuda_d2h);
+#endif
             auto cuda_end = std::chrono::high_resolution_clock::now();
 
             if (cuda_ok)
             {
+#ifdef ENABLE_CUDA_GENERATE_REUSE
+                cuda_reuse_generate_calls += 1;
+                cuda_reuse_generate_items += n;
+                cuda_alloc_calls += cuda_reuse_ctx.alloc_calls - alloc_before;
+                cuda_realloc_calls += cuda_reuse_ctx.realloc_calls - realloc_before;
+                cuda_reuse_total_time_sec += std::chrono::duration<double>(cuda_end - cuda_start).count();
+                cuda_reuse_h2d_time_sec += cuda_h2d;
+                cuda_reuse_kernel_time_sec += cuda_kernel;
+                cuda_reuse_d2h_time_sec += cuda_d2h;
+#endif
                 cuda_generate_calls += 1;
                 cuda_generate_items += n;
                 cuda_generate_total_time_sec += std::chrono::duration<double>(cuda_end - cuda_start).count();
@@ -759,6 +788,17 @@ void PriorityQueue::PrintGenerateStats() const
     cout << "cuda_h2d_time_sec=" << cuda_h2d_time_sec << endl;
     cout << "cuda_kernel_time_sec=" << cuda_kernel_time_sec << endl;
     cout << "cuda_d2h_time_sec=" << cuda_d2h_time_sec << endl;
+#ifdef ENABLE_CUDA_GENERATE_REUSE
+    cout << "[CUDAReuseGenerateStats]" << endl;
+    cout << "cuda_reuse_generate_calls=" << cuda_reuse_generate_calls << endl;
+    cout << "cuda_reuse_generate_items=" << cuda_reuse_generate_items << endl;
+    cout << "cuda_alloc_calls=" << cuda_alloc_calls << endl;
+    cout << "cuda_realloc_calls=" << cuda_realloc_calls << endl;
+    cout << "cuda_reuse_total_time_sec=" << cuda_reuse_total_time_sec << endl;
+    cout << "cuda_reuse_h2d_time_sec=" << cuda_reuse_h2d_time_sec << endl;
+    cout << "cuda_reuse_kernel_time_sec=" << cuda_reuse_kernel_time_sec << endl;
+    cout << "cuda_reuse_d2h_time_sec=" << cuda_reuse_d2h_time_sec << endl;
+#endif
     cout << "[PopNextStats]" << endl;
 #ifdef ENABLE_RELAXED_HEAP_PRIORITY
     cout << "priority_queue_mode = relaxed_heap" << endl;

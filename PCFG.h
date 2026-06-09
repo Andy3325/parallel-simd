@@ -335,4 +335,14 @@ public:
     double cuda_h2d_time_sec = 0.0;
     double cuda_kernel_time_sec = 0.0;
     double cuda_d2h_time_sec = 0.0;
+#ifdef ENABLE_CUDA_GENERATE_REUSE
+    long long cuda_reuse_generate_calls = 0;
+    long long cuda_reuse_generate_items = 0;
+    long long cuda_alloc_calls = 0;
+    long long cuda_realloc_calls = 0;
+    double cuda_reuse_total_time_sec = 0.0;
+    double cuda_reuse_h2d_time_sec = 0.0;
+    double cuda_reuse_kernel_time_sec = 0.0;
+    double cuda_reuse_d2h_time_sec = 0.0;
+#endif
 };

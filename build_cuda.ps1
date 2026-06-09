@@ -84,6 +84,14 @@ try {
     Invoke-Step "CUDA main direct" {
         nvcc -O2 -std=c++17 -DENABLE_CUDA_GENERATE @extraArgs @nvccHostArgs main.cpp train.cpp guessing.cpp md5.cpp gpu_generate_cuda.cu -o main_cuda.exe
     }
+
+    Invoke-Step "CUDA benchmark direct" {
+        nvcc -O2 -std=c++17 -DENABLE_CUDA_GENERATE @extraArgs @nvccHostArgs benchmark_cuda_generate.cpp gpu_generate_cuda.cu -o benchmark_cuda_generate.exe
+    }
+
+    Invoke-Step "CUDA batch benchmark direct" {
+        nvcc -x cu -O2 -std=c++17 -DENABLE_CUDA_GENERATE @extraArgs @nvccHostArgs benchmark_cuda_generate_batch.cpp gpu_generate_cuda.cu -o benchmark_cuda_generate_batch.exe
+    }
 }
 catch {
     Write-Host "[build] Direct nvcc build failed; trying object-file fallback"
@@ -91,18 +99,24 @@ catch {
     Remove-Item -Force -ErrorAction SilentlyContinue `
         main_cuda.exe, `
         test_cuda_generate.exe, `
+        benchmark_cuda_generate.exe, `
+        benchmark_cuda_generate_batch.exe, `
         main.o, `
         train.o, `
         guessing.o, `
         md5.o, `
         gpu_generate_cuda.o, `
         test_cuda_generate.o, `
+        benchmark_cuda_generate.o, `
+        benchmark_cuda_generate_batch.o, `
         main.obj, `
         train.obj, `
         guessing.obj, `
         md5.obj, `
         gpu_generate_cuda.obj, `
-        test_cuda_generate.obj
+        test_cuda_generate.obj, `
+        benchmark_cuda_generate.obj, `
+        benchmark_cuda_generate_batch.obj
 
     Invoke-Step "CPU objects with cl" {
         cl /nologo /O2 /std:c++17 /EHsc /utf-8 /DENABLE_CUDA_GENERATE @clExtraArgs /c main.cpp train.cpp guessing.cpp md5.cpp
@@ -116,8 +130,24 @@ catch {
         cl /nologo /O2 /std:c++17 /EHsc /utf-8 /DENABLE_CUDA_GENERATE @clExtraArgs /c test_cuda_generate.cpp
     }
 
+    Invoke-Step "CUDA benchmark object with cl" {
+        cl /nologo /O2 /std:c++17 /EHsc /utf-8 /DENABLE_CUDA_GENERATE @clExtraArgs /c benchmark_cuda_generate.cpp
+    }
+
+    Invoke-Step "CUDA batch benchmark object with nvcc" {
+        nvcc -x cu -O2 -std=c++17 -DENABLE_CUDA_GENERATE @extraArgs @nvccHostArgs -c benchmark_cuda_generate_batch.cpp -o benchmark_cuda_generate_batch.obj
+    }
+
     Invoke-Step "Link smoke test with nvcc" {
         nvcc test_cuda_generate.obj gpu_generate_cuda.obj -o test_cuda_generate.exe
+    }
+
+    Invoke-Step "Link CUDA benchmark with nvcc" {
+        nvcc benchmark_cuda_generate.obj gpu_generate_cuda.obj -o benchmark_cuda_generate.exe
+    }
+
+    Invoke-Step "Link CUDA batch benchmark with nvcc" {
+        nvcc benchmark_cuda_generate_batch.obj gpu_generate_cuda.obj -o benchmark_cuda_generate_batch.exe
     }
 
     Invoke-Step "Link CUDA main with nvcc" {
